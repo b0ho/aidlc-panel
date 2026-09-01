@@ -1,0 +1,6 @@
+# Build output and dependencies — not source, not committed
+node_modules/
+out/
+*.tsbuildinfo
+# Stray sensor/tool scratch that can land here when tools run from this cwd
+aidlc/

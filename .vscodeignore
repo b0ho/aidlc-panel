@@ -1,0 +1,12 @@
+.vscode/**
+src/**
+**/*.map
+**/tsconfig.json
+.gitignore
+**/*.tsbuildinfo
+aidlc/**
+*.vsix
+*_out.txt
+tsc_*.txt
+node_modules/**
+!node_modules/none
