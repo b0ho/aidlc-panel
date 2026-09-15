@@ -4,6 +4,10 @@
 
 No more digging through terminal logs or state files. One **AI-DLC** icon in the Activity Bar shows progress, artifacts, review status, and token usage, and lets you continue the workflow. The panel reads engine state **read-only** — it never touches or changes your workflow files.
 
+![AI-DLC Panel — stages with per-stage credits, and inline Q&A](https://raw.githubusercontent.com/b0ho/aidlc-panel/main/media/screenshot-qa.png)
+
+![Stage detail — token usage, review status, assigned agents, and execution history](https://raw.githubusercontent.com/b0ho/aidlc-panel/main/media/screenshot-stage.png)
+
 ## What you can do
 
 - **Know where you are** — overall progress, current Phase/Stage, and the next action at a glance.

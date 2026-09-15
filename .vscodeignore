@@ -10,3 +10,6 @@ aidlc/**
 tsc_*.txt
 node_modules/**
 !node_modules/none
+# README screenshots are loaded from raw GitHub URLs, not bundled in the vsix
+media/screenshot-*.png
+media/icon.svg
