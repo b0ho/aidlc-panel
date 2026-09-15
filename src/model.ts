@@ -15,6 +15,9 @@ export type StageStatus =
 export interface ArtifactModel {
   name: string;
   absPath: string;
+  /** Construction Bolt this artifact belongs to, or null/undefined when it is
+   *  not nested under a Bolt. Drives per-Bolt grouping in the artifacts view. */
+  bolt?: string | null;
 }
 
 export interface StageModel {
@@ -100,13 +103,25 @@ export function isQuestionsArtifact(nameOrPath: string): boolean {
  * one folder.
  */
 export function findAidlcRoot(): string | undefined {
+  return findAidlcRoots()[0];
+}
+
+/**
+ * List every open workspace folder that hosts an AI-DLC engine
+ * (`.kiro/tools/aidlc-lib.ts`), preserving workspace-folder order. In a
+ * multi-root workspace with several AI-DLC projects (e.g. multiple repos under
+ * one parent) this returns all of them so the panel can target the one the user
+ * is actually working in, instead of being pinned to the first folder.
+ */
+export function findAidlcRoots(): string[] {
   const folders = vscode.workspace.workspaceFolders ?? [];
+  const out: string[] = [];
   for (const folder of folders) {
     if (fs.existsSync(path.join(folder.uri.fsPath, ENGINE_LIB_REL))) {
-      return folder.uri.fsPath;
+      out.push(folder.uri.fsPath);
     }
   }
-  return undefined;
+  return out;
 }
 
 /**
@@ -238,7 +253,22 @@ export class PanelStore {
   private readonly _emitter = new vscode.EventEmitter<void>();
   readonly onDidChange = this._emitter.event;
 
-  constructor(readonly root: string | undefined) {}
+  constructor(private _root: string | undefined) {}
+
+  get root(): string | undefined {
+    return this._root;
+  }
+
+  /** Retarget the store at a different AI-DLC workspace root and reload. No-op
+   *  when the root is unchanged, so redundant active-editor events are cheap. */
+  setRoot(root: string | undefined): void {
+    if (root === this._root) {
+      return;
+    }
+    this._root = root;
+    this._model = undefined;
+    this.refresh();
+  }
 
   get model(): PanelModel | undefined {
     return this._model;
@@ -246,7 +276,7 @@ export class PanelStore {
 
   refresh(): void {
     const seq = ++this._seq;
-    void loadModel(this.root).then((model) => {
+    void loadModel(this._root).then((model) => {
       if (seq !== this._seq) {
         return; // a newer refresh already superseded this one
       }

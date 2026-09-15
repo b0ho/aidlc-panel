@@ -4,6 +4,14 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { ActionsProvider } from "./actions";
 import { readStageEvents } from "./audit";
+import {
+  addAction,
+  deleteAction,
+  getCustomActions,
+  promptForAction,
+  updateAction,
+  type CustomAction,
+} from "./customActions";
 import { GitStatus } from "./git";
 import {
   initI18n,
@@ -15,11 +23,12 @@ import {
 } from "./i18n";
 import {
   ensureModelTool,
-  findAidlcRoot,
+  findAidlcRoots,
   isQuestionsArtifact,
   PanelStore,
   StageModel,
 } from "./model";
+import { NotepadViewProvider } from "./notepad";
 import { OverviewViewProvider } from "./overviewView";
 import { QuestionDetailPanel } from "./questionDetail";
 import { ReferenceProvider } from "./reference";
@@ -28,8 +37,99 @@ import { StageDetailPanel } from "./stageDetail";
 import { TipDetailPanel } from "./tipDetail";
 import { findTip, TipsProvider } from "./tips";
 import { ArtifactsProvider, ProgressProvider } from "./trees";
+import { fmtCredits, loadUsage, UsageStore, type UsageScope } from "./usage";
+import { UsageProvider } from "./usageView";
 
 const HEAD_SCHEME = "aidlc-panel-head";
+
+/** Active intent record directory (…/intents/<intent>) for the current model,
+ *  or undefined when there is no active intent. Drives audit-based stage
+ *  attribution for usage. */
+function recordDirOf(
+  model: PanelStore["model"],
+  root: string | undefined,
+): string | undefined {
+  if (model && model.ok && model.intent && root) {
+    return path.join(root, "aidlc", "spaces", model.space, "intents", model.intent);
+  }
+  return undefined;
+}
+
+/**
+ * The AI-DLC root that owns the active editor's file, if that root is one of
+ * the open AI-DLC workspaces. Returns undefined when there is no editor or the
+ * file lives outside every AI-DLC folder.
+ */
+function rootOfActiveEditor(roots: string[]): string | undefined {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    return undefined;
+  }
+  const folder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+  if (!folder) {
+    return undefined;
+  }
+  return roots.find((r) => r === folder.uri.fsPath);
+}
+
+/**
+ * Decide which AI-DLC root the panel should target. Prefers the root that owns
+ * the active editor (so opening a file in another project switches the panel to
+ * it), otherwise keeps the current selection when it is still valid, and falls
+ * back to the first root.
+ */
+function pickActiveRoot(
+  roots: string[],
+  current: string | undefined,
+): string | undefined {
+  if (roots.length === 0) {
+    return undefined;
+  }
+  const fromEditor = rootOfActiveEditor(roots);
+  if (fromEditor) {
+    return fromEditor;
+  }
+  if (current && roots.includes(current)) {
+    return current;
+  }
+  return roots[0];
+}
+
+/**
+ * Resolve which custom action an edit/delete command targets. Inline tree
+ * buttons pass the tree node, the command palette passes nothing (so we show a
+ * picker), and programmatic callers may pass the id directly.
+ */
+async function resolveCustomAction(
+  arg: unknown,
+): Promise<CustomAction | undefined> {
+  const actions = getCustomActions();
+  if (arg && typeof arg === "object" && "action" in arg) {
+    const a = (arg as { action?: CustomAction }).action;
+    if (a && typeof a.id === "string") {
+      return actions.find((x) => x.id === a.id) ?? a;
+    }
+  }
+  if (typeof arg === "string") {
+    const found = actions.find((x) => x.id === arg);
+    if (found) {
+      return found;
+    }
+  }
+  if (actions.length === 0) {
+    vscode.window.showInformationMessage(t("No custom actions yet."));
+    return undefined;
+  }
+  const pick = await vscode.window.showQuickPick(
+    actions.map((a) => ({
+      label: a.label,
+      description: a.newSession ? t("new session") : t("current session"),
+      id: a.id,
+    })),
+    { placeHolder: t("Select a custom action") },
+  );
+  return pick ? actions.find((x) => x.id === pick.id) : undefined;
+}
 
 // Candidate command ids that (on some Kiro/VS Code builds) open the chat and
 // accept a query. There is no documented public API, so we probe what exists
@@ -121,41 +221,66 @@ async function sendToKiro(
     }
   }
 
-  // Best-effort: open/submit the request if a command honours a query argument.
-  const present = CHAT_COMMAND_CANDIDATES.filter((id) => all.includes(id));
-  const shapes = (p: string): unknown[] => [
-    { query: p },
-    { prompt: p },
-    { message: p },
-    { text: p },
-    p,
-  ];
-  let opened = false;
-  outer: for (const id of present) {
-    for (const arg of shapes(prompt)) {
-      try {
-        await vscode.commands.executeCommand(id, arg);
-        opened = true;
-        break outer;
-      } catch {
-        /* try next shape */
-      }
-    }
-  }
-  if (!opened) {
-    for (const id of present) {
-      try {
-        await vscode.commands.executeCommand(id);
-        break;
-      } catch {
-        /* ignore */
-      }
-    }
-  }
+  // Put the prompt into the Kiro chat input (and always onto the clipboard as a
+  // guaranteed fallback). Whether it is auto-sent or just pasted for review is
+  // controlled by the aidlcPanel.autoSubmitPrompts setting.
+  const outcome = await deliverPromptToChat(prompt, all);
 
-  // Kiro exposes no reliable public API to inject text into the chat input, so
-  // query-submit is best-effort and silently no-ops on many builds. Guarantee
-  // usability by putting the prompt on the clipboard for a one-key paste.
+  const where = freshSession ? t("a new Kiro session") : t("Kiro chat");
+  const pasteKey = process.platform === "darwin" ? "Cmd+V" : "Ctrl+V";
+  if (outcome === "submitted") {
+    vscode.window.setStatusBarMessage(
+      t("$(comment-discussion) Sent the prompt to {0}.", where),
+      4000,
+    );
+  } else {
+    // We cannot reliably confirm the text landed in the chat input on every
+    // Kiro build, so we don't claim it did. The clipboard always has it — tell
+    // the user the one-key paste that is guaranteed to work.
+    void vscode.window.showInformationMessage(
+      t(
+        "Opened {0} and copied the prompt to the clipboard. Press {1} in the chat to paste, then Enter.",
+        where,
+        pasteKey,
+      ),
+    );
+  }
+}
+
+/** Whether custom/workflow prompts should be sent immediately (query-submit)
+ *  rather than left for the user to paste and send. Defaults to false so
+ *  nothing is submitted without a look. */
+function autoSubmitPrompts(): boolean {
+  return vscode.workspace
+    .getConfiguration("aidlcPanel")
+    .get<boolean>("autoSubmitPrompts", false);
+}
+
+type DeliverOutcome = "submitted" | "copied" | "opened";
+
+// Commands that focus the chat input box, tried before a programmatic paste.
+// Runtime-probed like the open/new candidates — unknown ones are skipped.
+const CHAT_FOCUS_CANDIDATES = [
+  "kiroAgent.focusChatInput",
+  "kiroAgent.focusChat",
+  "aws.amazonq.focusChat",
+  "workbench.action.chat.focusInput",
+  "workbench.action.chat.open",
+];
+
+/**
+ * Best-effort delivery of `prompt` to the Kiro chat. Always copies to the
+ * clipboard first (the guaranteed manual-paste fallback).
+ *  - autoSubmit on: try query-submit shapes; return "submitted" if one runs.
+ *  - autoSubmit off (default): open + focus the chat and attempt a real paste
+ *    (editor paste command) so the text lands in the input for review. We can't
+ *    verify the paste on every build, so we report "opened"/"copied" (honest)
+ *    and the caller tells the user the guaranteed one-key paste.
+ */
+async function deliverPromptToChat(
+  prompt: string,
+  all: string[],
+): Promise<DeliverOutcome> {
   let copied = false;
   try {
     await vscode.env.clipboard.writeText(prompt);
@@ -164,24 +289,58 @@ async function sendToKiro(
     /* clipboard unavailable */
   }
 
-  const where = freshSession
-    ? t("a new Kiro session")
-    : t("Kiro chat");
-  if (copied) {
-    void vscode.window.showInformationMessage(
-      t(
-        "Opened {0} and copied the prompt to the clipboard. Paste it into the chat (Ctrl+V) and run.",
-        where,
-      ),
-    );
-  } else {
-    vscode.window.setStatusBarMessage(
-      contextFile
-        ? t("$(comment-discussion) Opened the file as context in {0}.", where)
-        : t("$(comment-discussion) Opened {0}.", where),
-      4000,
-    );
+  const present = CHAT_COMMAND_CANDIDATES.filter((id) => all.includes(id));
+
+  if (autoSubmitPrompts()) {
+    // Try to submit the query outright. First shape that doesn't throw wins.
+    const shapes: unknown[] = [
+      { query: prompt },
+      { prompt },
+      { message: prompt },
+      { text: prompt },
+      prompt,
+    ];
+    for (const id of present) {
+      for (const arg of shapes) {
+        try {
+          await vscode.commands.executeCommand(id, arg);
+          return "submitted";
+        } catch {
+          /* try next shape */
+        }
+      }
+    }
   }
+
+  // Open a chat (no arg), focus its input, then paste from the clipboard.
+  for (const id of present) {
+    try {
+      await vscode.commands.executeCommand(id);
+      break;
+    } catch {
+      /* try next */
+    }
+  }
+  await sleep(150);
+  for (const id of CHAT_FOCUS_CANDIDATES) {
+    if (!all.includes(id)) {
+      continue;
+    }
+    try {
+      await vscode.commands.executeCommand(id);
+      break;
+    } catch {
+      /* try next */
+    }
+  }
+  // editor.action.clipboardPasteAction pastes into the focused editor-like
+  // input (Kiro's chat box is a Monaco input on most builds). Best-effort.
+  try {
+    await vscode.commands.executeCommand("editor.action.clipboardPasteAction");
+  } catch {
+    /* not an editor context; user pastes manually */
+  }
+  return copied ? "copied" : "opened";
 }
 
 /** Resolve an absolute artifact path from a command argument that may be
@@ -321,7 +480,14 @@ export function activate(context: vscode.ExtensionContext): void {
   // Load translations + language preference before anything renders.
   initI18n(context);
 
-  const root = findAidlcRoot();
+  // The AI-DLC workspace the panel currently targets. In a multi-root
+  // workspace several folders can each host an engine; instead of pinning to
+  // the first one forever, we track all of them (`roots`) and keep an active
+  // selection (`root`) that follows the editor the user is working in and can
+  // be switched by hand. Everything downstream reads this mutable `root`, so a
+  // switch retargets the whole panel (see switchRoot).
+  let roots = findAidlcRoots();
+  let root = pickActiveRoot(roots, undefined);
   // Install the read-only model tool into the workspace's .kiro/tools so it
   // sits beside aidlc-lib.ts (which it imports). Runs on every AI-DLC
   // workspace, so the panel works in new windows without manual setup.
@@ -330,10 +496,38 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   const store = new PanelStore(root);
+  const USAGE_SCOPE_KEY = "aidlcPanel.usageScope";
+  const initialUsageScope = context.workspaceState.get<UsageScope>(
+    USAGE_SCOPE_KEY,
+    "workspace",
+  );
+  const USAGE_PERIOD_KEY = "aidlcPanel.usagePeriod";
+  const initialUsagePeriod = context.workspaceState.get<string>(
+    USAGE_PERIOD_KEY,
+    "",
+  );
+  const USAGE_ENABLED_KEY = "aidlcPanel.usageTracking";
+  const initialUsageEnabled = context.globalState.get<boolean>(
+    USAGE_ENABLED_KEY,
+    true,
+  );
+  const usage = new UsageStore(
+    root,
+    undefined,
+    initialUsageScope,
+    initialUsagePeriod,
+    initialUsageEnabled,
+  );
+  void vscode.commands.executeCommand(
+    "setContext",
+    "aidlcPanel.usageGlobal",
+    initialUsageScope === "global",
+  );
   const review = new ReviewState(context.workspaceState, store);
   const git = new GitStatus(root);
   const overview = new OverviewViewProvider(store, review);
-  const progress = new ProgressProvider(store, context.workspaceState);
+  const progress = new ProgressProvider(store, context.workspaceState, usage);
+  const usageView = new UsageProvider(usage, store);
   const artifacts = new ArtifactsProvider(
     store,
     context.workspaceState,
@@ -343,7 +537,9 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   const reference = new ReferenceProvider(store, root ?? "");
   const tips = new TipsProvider();
-  const actions = new ActionsProvider(store);
+  const notepad = new NotepadViewProvider(context.workspaceState);
+  const tasks = new ActionsProvider(store, "tasks");
+  const features = new ActionsProvider(store, "features", () => usage.enabled);
   void artifacts.syncContext();
   void progress.syncContext();
 
@@ -393,13 +589,147 @@ export function activate(context: vscode.ExtensionContext): void {
   git.refresh();
   store.onDidChange(() => {
     git.refresh();
+    // Retarget usage at the active intent's record dir, then reload it so
+    // per-stage credit badges and the usage view track the current model.
+    usage.setRecordDir(recordDirOf(store.model, root));
+    usage.refresh();
     StageDetailPanel.refresh();
     updateStatusUi();
   });
+  // Per-stage detail credit card also refreshes when usage reloads.
+  usage.onDidChange(() => StageDetailPanel.refresh());
   review.onDidChange(() => StageDetailPanel.refresh());
   // git status resolves asynchronously; refresh the stage-detail change badges
   // when it lands (the artifacts tree subscribes to git directly).
   git.onDidChange(() => StageDetailPanel.refresh());
+
+  /* ----------------------- Workspace targeting -------------------------- */
+
+  // Debounced model reload, shared by the file watchers below. Hoisted here so
+  // installWatchers (which is re-run on every root switch) can reference it.
+  let refreshDebounce: ReturnType<typeof setTimeout> | undefined;
+  const scheduleRefresh = (): void => {
+    if (refreshDebounce) {
+      clearTimeout(refreshDebounce);
+    }
+    // 500ms coalesces the bursts an agent produces when it writes several
+    // files at once into a single model reload.
+    refreshDebounce = setTimeout(() => store.refresh(), 500);
+  };
+
+  // File watchers are scoped to a single root's `aidlc/` tree, so they must be
+  // re-created whenever the panel switches to a different root. Track the live
+  // ones and dispose them before installing the new set.
+  let watcherDisposables: vscode.Disposable[] = [];
+  const installWatchers = (target: string | undefined): void => {
+    for (const d of watcherDisposables) {
+      d.dispose();
+    }
+    watcherDisposables = [];
+    if (!target) {
+      return;
+    }
+    const track = (w: vscode.FileSystemWatcher): void => {
+      watcherDisposables.push(w);
+      context.subscriptions.push(w);
+    };
+
+    // Structure changes: any artifact markdown appearing or disappearing —
+    // including a new file inside a construction Bolt directory
+    // (`construction/<bolt>/<stage>/*.md`) or a brand-new Bolt subdirectory —
+    // changes the tree, so reload on create/delete. We deliberately DO NOT
+    // reload on content edits (onDidChange) here: re-saving an artifact's text
+    // does not change the tree, and reacting to every save would spawn the
+    // model tool far too often during an active run.
+    const structureWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(target, "aidlc/**/*.md"),
+    );
+    structureWatcher.onDidCreate(scheduleRefresh);
+    structureWatcher.onDidDelete(scheduleRefresh);
+    track(structureWatcher);
+
+    // Content-driven status: aidlc-state.md (current stage / status) and
+    // `*-questions.md` (open vs answered counts) DO need a reload when their
+    // contents change, so the status bar and Q&A badges stay live.
+    const stateWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(target, "aidlc/**/{aidlc-state.md,*-questions.md}"),
+    );
+    stateWatcher.onDidChange(scheduleRefresh);
+    stateWatcher.onDidCreate(scheduleRefresh);
+    stateWatcher.onDidDelete(scheduleRefresh);
+    track(stateWatcher);
+
+    // Cursor files carry no extension, so watch them separately: active-space
+    // at the space root and active-intent under each space's intents dir. A
+    // change here switches the active intent/space, which reshapes everything.
+    const cursorWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(target, "aidlc/**/{active-intent,active-space}"),
+    );
+    cursorWatcher.onDidChange(scheduleRefresh);
+    cursorWatcher.onDidCreate(scheduleRefresh);
+    cursorWatcher.onDidDelete(scheduleRefresh);
+    track(cursorWatcher);
+  };
+
+  // Expose whether more than one AI-DLC workspace is open so the "switch
+  // workspace" title button only appears when it is actually useful.
+  const syncWorkspaceContext = (): void => {
+    void vscode.commands.executeCommand(
+      "setContext",
+      "aidlcPanel.multiRoot",
+      roots.length > 1,
+    );
+  };
+
+  // Retarget the entire panel at a different AI-DLC root. Order matters: update
+  // git's root before the store reloads, because the store's onDidChange runs
+  // git.refresh() and we want it to read the new working tree.
+  const switchRoot = (next: string | undefined): void => {
+    if (next === root) {
+      return;
+    }
+    root = next;
+    if (root) {
+      ensureModelTool(root, context.extensionPath);
+    }
+    git.setRoot(root);
+    artifacts.setRoot(root ?? "");
+    reference.setRoot(root ?? "");
+    usage.setRoot(root); // store-only; the store reload below drives usage.refresh
+    installWatchers(root);
+    store.setRoot(root); // reloads the model, which cascades git + status UI
+    updateStatusUi();
+  };
+
+  // Follow the editor: opening a file that belongs to another open AI-DLC
+  // project switches the panel to that project. Files outside every AI-DLC
+  // folder (or in the current one) leave the selection untouched.
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      const match = rootOfActiveEditor(roots);
+      if (match && match !== root) {
+        switchRoot(match);
+      }
+    }),
+    // Folders added/removed change the candidate set; recompute and re-target
+    // if the current selection went away.
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      roots = findAidlcRoots();
+      syncWorkspaceContext();
+      if (!root || !roots.includes(root)) {
+        switchRoot(pickActiveRoot(roots, root));
+      }
+    }),
+  );
+
+  installWatchers(root);
+  syncWorkspaceContext();
+
+  // NOTE: usage is refreshed on model reloads (see store.onDidChange) and when
+  // the Token Usage view becomes visible (wired after the view is created), not
+  // by watching ~/.kiro/sessions. A recursive watcher over that store (which
+  // holds large snapshots/ trees) starved the workspace's own aidlc/** watchers
+  // and slowed the whole panel — so we deliberately do not watch it.
 
   // Stage-detail data source: audit timeline + review flags + git change state.
   StageDetailPanel.setExtrasProvider((stage) => {
@@ -416,13 +746,17 @@ export function activate(context: vscode.ExtensionContext): void {
           .map((a) => a.name),
       ),
       changeState: (abs) => git.state(abs),
+      usage: usage.stageUsage(stage.slug),
     };
   });
 
   // Tree views are created (not just registered) so their section titles can be
   // relabelled live when the panel language switches.
   const actionsView = vscode.window.createTreeView("aidlcPanelActions", {
-    treeDataProvider: actions,
+    treeDataProvider: tasks,
+  });
+  const featuresView = vscode.window.createTreeView("aidlcPanelFeatures", {
+    treeDataProvider: features,
   });
   const progressView = vscode.window.createTreeView("aidlcPanelProgress", {
     treeDataProvider: progress,
@@ -436,24 +770,76 @@ export function activate(context: vscode.ExtensionContext): void {
   const tipsView = vscode.window.createTreeView("aidlcPanelTips", {
     treeDataProvider: tips,
   });
+  const usageTreeView = vscode.window.createTreeView("aidlcPanelUsage", {
+    treeDataProvider: usageView,
+  });
+  // Refresh usage lazily: when the Token Usage view is shown, and — while it
+  // stays visible — on a slow poll so an active conversation's new turns appear
+  // without the cost of watching the whole session store. The scan is async and
+  // cache-backed (only changed session logs re-parse), so this is cheap.
+  let usagePoll: ReturnType<typeof setInterval> | undefined;
+  const stopUsagePoll = (): void => {
+    if (usagePoll) {
+      clearInterval(usagePoll);
+      usagePoll = undefined;
+    }
+  };
+  context.subscriptions.push(
+    usageTreeView.onDidChangeVisibility((e) => {
+      if (e.visible) {
+        usage.refresh();
+        if (!usagePoll) {
+          usagePoll = setInterval(() => {
+            if (usageTreeView.visible) {
+              usage.refresh();
+            }
+          }, 15000);
+        }
+      } else {
+        stopUsagePoll();
+      }
+    }),
+    { dispose: stopUsagePoll },
+  );
   const setViewTitles = (): void => {
-    actionsView.title = t("Actions");
+    actionsView.title = t("Tasks");
+    featuresView.title = t("Features");
     progressView.title = t("Stages");
     artifactsView.title = t("Artifacts & Review");
     referenceView.title = t("Reference & History");
     tipsView.title = t("Tips & Help");
+    usageTreeView.title = t("Token Usage");
+    // Short guidance at the top of the view: clearing context erases the local
+    // credit history, so continue in a new session instead of /clear · /compact.
+    usageTreeView.message = t(
+      "Tip: to keep usage history, continue in a new session\n— /clear and /compact erase it.",
+    );
     overview.setTitle(t("Overview"));
+    notepad.setTitle(t("Notepad"));
   };
   setViewTitles();
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("aidlcPanelOverview", overview),
+    vscode.window.registerWebviewViewProvider("aidlcPanelNotepad", notepad, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
     actionsView,
+    featuresView,
     progressView,
     artifactsView,
     referenceView,
     tipsView,
+    usageTreeView,
   );
+
+  // Persist tree expand/collapse across IDE reloads: VS Code does not remember
+  // item expansion on its own, so we record it per view in workspaceState and
+  // re-apply it when the tree items are rebuilt.
+  progressView.onDidExpandElement((e) => void progress.setExpanded(e.element, true));
+  progressView.onDidCollapseElement((e) => void progress.setExpanded(e.element, false));
+  artifactsView.onDidExpandElement((e) => void artifacts.setExpanded(e.element, true));
+  artifactsView.onDidCollapseElement((e) => void artifacts.setExpanded(e.element, false));
 
   // Live re-render everything when the panel language changes.
   context.subscriptions.push(
@@ -498,6 +884,91 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("aidlcPanel.refresh", () => store.refresh()),
+
+    // Manually pick which open AI-DLC project the panel targets. The panel also
+    // follows the active editor automatically; this is the explicit override
+    // for when several AI-DLC folders are open at once.
+    vscode.commands.registerCommand("aidlcPanel.selectWorkspace", async () => {
+      roots = findAidlcRoots();
+      syncWorkspaceContext();
+      if (roots.length <= 1) {
+        vscode.window.showInformationMessage(
+          t("Only one AI-DLC workspace is open."),
+        );
+        return;
+      }
+      const items = roots.map((r) => ({
+        label: `${r === root ? "● " : ""}${path.basename(r)}`,
+        description: r,
+        target: r,
+      }));
+      const pick = await vscode.window.showQuickPick(items, {
+        placeHolder: t("Select the AI-DLC workspace to show"),
+      });
+      if (pick) {
+        switchRoot(pick.target);
+      }
+    }),
+
+    // Run a user-defined custom action: hand its prompt to Kiro exactly like
+    // "Continue workflow", honoring the action's new-session preference.
+    vscode.commands.registerCommand(
+      "aidlcPanel.runCustomAction",
+      async (arg: unknown) => {
+        const id = typeof arg === "string" ? arg : undefined;
+        const action = getCustomActions().find((a) => a.id === id);
+        if (!action) {
+          return;
+        }
+        await sendToKiro(action.prompt, undefined, {
+          newSession: action.newSession,
+        });
+      },
+    ),
+
+    // Guided create flow (label → prompt → new-session choice), then persist.
+    vscode.commands.registerCommand("aidlcPanel.addCustomAction", async () => {
+      const created = await promptForAction();
+      if (created) {
+        await addAction(created);
+      }
+    }),
+
+    // Edit an existing custom action. Accepts either the action id (from the
+    // inline button) or falls back to a picker.
+    vscode.commands.registerCommand(
+      "aidlcPanel.editCustomAction",
+      async (arg: unknown) => {
+        const existing = await resolveCustomAction(arg);
+        if (!existing) {
+          return;
+        }
+        const edited = await promptForAction(existing);
+        if (edited) {
+          await updateAction(edited);
+        }
+      },
+    ),
+
+    // Delete a custom action (with a confirmation), by id or via a picker.
+    vscode.commands.registerCommand(
+      "aidlcPanel.deleteCustomAction",
+      async (arg: unknown) => {
+        const existing = await resolveCustomAction(arg);
+        if (!existing) {
+          return;
+        }
+        const del = t("Delete");
+        const confirm = await vscode.window.showWarningMessage(
+          t('Delete the custom action "{0}"?', existing.label),
+          { modal: true },
+          del,
+        );
+        if (confirm === del) {
+          await deleteAction(existing.id);
+        }
+      },
+    ),
 
     // Switch the panel language independently of the IDE (auto / en / ko).
     vscode.commands.registerCommand("aidlcPanel.setLanguage", async () => {
@@ -847,6 +1318,145 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.window.showTextDocument(doc);
     }),
 
+    // Re-scan Kiro session logs for the usage view (the model refresh already
+    // does this; this is the explicit button for the Token Usage view title).
+    vscode.commands.registerCommand("aidlcPanel.refreshUsage", () =>
+      usage.refresh(),
+    ),
+
+    // Turn token usage calculation on/off (default on). When off, no session
+    // logs are scanned and all usage surfaces go blank. Persisted globally.
+    vscode.commands.registerCommand("aidlcPanel.toggleUsageTracking", async () => {
+      const next = !usage.enabled;
+      await context.globalState.update(USAGE_ENABLED_KEY, next);
+      usage.setEnabled(next);
+      features.refresh();
+      vscode.window.setStatusBarMessage(
+        next
+          ? t("$(eye) Token usage tracking on")
+          : t("$(eye-closed) Token usage tracking off"),
+        3000,
+      );
+    }),
+
+    // Toggle the usage view between the active workspace and all workspaces
+    // (a cross-project total). Persisted per workspace.
+    vscode.commands.registerCommand("aidlcPanel.usageScopeGlobal", async () => {
+      await context.workspaceState.update(USAGE_SCOPE_KEY, "global");
+      await vscode.commands.executeCommand(
+        "setContext",
+        "aidlcPanel.usageGlobal",
+        true,
+      );
+      usage.setScope("global");
+    }),
+    vscode.commands.registerCommand("aidlcPanel.usageScopeWorkspace", async () => {
+      await context.workspaceState.update(USAGE_SCOPE_KEY, undefined);
+      await vscode.commands.executeCommand(
+        "setContext",
+        "aidlcPanel.usageGlobal",
+        false,
+      );
+      usage.setScope("workspace");
+    }),
+
+    // Filter the usage view by month (or all time). Choices are the months
+    // present in the current scope's data.
+    vscode.commands.registerCommand("aidlcPanel.usagePeriod", async () => {
+      const u = usage.usage;
+      const cur = usage.period;
+      const dot = (v: string): string => (cur === v ? "● " : "");
+      const items: { label: string; period: string }[] = [
+        { label: `${dot("")}${t("All time")}`, period: "" },
+        ...(u?.months ?? []).map((m) => ({ label: `${dot(m)}${m}`, period: m })),
+      ];
+      const pick = await vscode.window.showQuickPick(items, {
+        placeHolder: t("Filter token usage by month"),
+      });
+      if (!pick) {
+        return;
+      }
+      await context.workspaceState.update(
+        USAGE_PERIOD_KEY,
+        pick.period || undefined,
+      );
+      usage.setPeriod(pick.period);
+    }),
+
+    // Feasibility probe: report whether Kiro credit/token usage can be read for
+    // this workspace, and a summary of what was found. Opens a markdown report.
+    vscode.commands.registerCommand("aidlcPanel.probeTokenUsage", async () => {
+      const rec = recordDirOf(store.model, root);
+      const u = await loadUsage(root, rec, "workspace");
+      const none = t("(none)");
+      const lines: string[] = [];
+      lines.push(`# ${t("Token usage probe")}`);
+      lines.push("");
+      lines.push(`- ${t("Sessions store")}: \`${u.sessionsRoot}\``);
+      lines.push(`- ${t("Workspace")}: \`${root ?? none}\``);
+      lines.push(
+        `- ${t("Stage attribution (audit)")}: ${u.hasStageAttribution ? t("available") : t("unavailable")}`,
+      );
+      lines.push("");
+      lines.push(
+        `**${t("Matched sessions")}: ${u.sessions.length}** · ` +
+          `**${t("Turns")}: ${u.turnCount}** · ` +
+          `**${t("Total credits")}: ${fmtCredits(u.totalCredits)}**`,
+      );
+      lines.push("");
+      if (u.sessions.length === 0) {
+        lines.push(
+          t(
+            "No Kiro sessions matched this workspace. Token usage is read from ~/.kiro/sessions; open this project in Kiro and have a conversation to generate data.",
+          ),
+        );
+      } else {
+        lines.push(`## ${t("Sessions")}`);
+        for (const s of u.sessions) {
+          lines.push(
+            `- **${s.title}** — ⚡ ${fmtCredits(s.totalCredits)} · ` +
+              t("{0} turns", s.turns.length) +
+              (s.modelId ? ` · ${s.modelId}` : "") +
+              (s.latestContextPercent !== undefined
+                ? ` · ${Math.round(s.latestContextPercent)}%`
+                : ""),
+          );
+        }
+        if (u.byIntent.size > 0) {
+          lines.push("");
+          lines.push(`## ${t("By intent")}`);
+          const rows = [...u.byIntent.entries()].sort(
+            (a, b) => b[1].credits - a[1].credits,
+          );
+          for (const [intent, agg] of rows) {
+            const active = intent === u.activeIntent ? " ●" : "";
+            lines.push(
+              `- **${intent}**${active} — ⚡ ${fmtCredits(agg.credits)} · ${t("{0} turns", agg.turns)}`,
+            );
+          }
+        }
+        if (u.byStage.size > 0) {
+          lines.push("");
+          lines.push(
+            `## ${t("By stage")}` +
+              (u.activeIntent ? ` (${u.activeIntent})` : ""),
+          );
+          for (const [slug, agg] of u.byStage) {
+            const stage = (store.model?.stages ?? []).find((s) => s.slug === slug);
+            const name = stage ? `${stage.number} ${stage.name}` : slug;
+            lines.push(
+              `- **${name}** — ⚡ ${fmtCredits(agg.credits)} · ${t("{0} turns", agg.turns)}`,
+            );
+          }
+        }
+      }
+      const doc = await vscode.workspace.openTextDocument({
+        content: lines.join("\n") + "\n",
+        language: "markdown",
+      });
+      vscode.window.showTextDocument(doc);
+    }),
+
     vscode.commands.registerCommand("aidlcPanel.openFullDashboard", () => {
       if (!root) {
         return;
@@ -872,33 +1482,6 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   /* --------------------------- Live refresh ----------------------------- */
-
-  if (root) {
-    let debounce: ReturnType<typeof setTimeout> | undefined;
-    const scheduleRefresh = (): void => {
-      if (debounce) {
-        clearTimeout(debounce);
-      }
-      debounce = setTimeout(() => store.refresh(), 300);
-    };
-    const watcher = vscode.workspace.createFileSystemWatcher(
-      // Watch state + cursor files AND `*-questions.md` Q&A files: entering a
-      // human turn (agent asks the user questions) writes/updates a questions
-      // file without necessarily touching aidlc-state.md, so without this the
-      // status bar never refreshes and the one-shot "awaiting answers"
-      // notification never fires.
-      new vscode.RelativePattern(root, "aidlc/**/{aidlc-state.md,active-intent,*-questions.md}"),
-    );
-    const spaceWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(root, "aidlc/active-space"),
-    );
-    for (const w of [watcher, spaceWatcher]) {
-      w.onDidChange(scheduleRefresh);
-      w.onDidCreate(scheduleRefresh);
-      w.onDidDelete(scheduleRefresh);
-      context.subscriptions.push(w);
-    }
-  }
 
   store.refresh();
 }

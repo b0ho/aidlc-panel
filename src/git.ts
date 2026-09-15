@@ -19,7 +19,13 @@ export class GitStatus {
   /** Fires after a refresh completes (badge sets may have changed). */
   readonly onDidChange = this._emitter.event;
 
-  constructor(private readonly root: string | undefined) {}
+  constructor(private root: string | undefined) {}
+
+  /** Retarget at a different repository root. The next refresh() reads its
+   *  working tree; call refresh() after switching. */
+  setRoot(root: string | undefined): void {
+    this.root = root;
+  }
 
   /** Re-read git status asynchronously. Call on each model refresh. The parsed
    *  sets are swapped in atomically on completion, so lookups never see a

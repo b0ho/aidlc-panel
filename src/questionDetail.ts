@@ -2,8 +2,16 @@ import * as vscode from "vscode";
 import { currentLang, t } from "./i18n";
 
 interface QuestionOption {
+  /** Short badge shown in the option button (a letter like "A", or a number
+   *  for label-style options). */
   key: string;
+  /** The primary option text shown next to the badge. */
   text: string;
+  /** The string written into `[Answer]:` when this option is chosen. Defaults
+   *  to `key` (letter formats); for label-style options it is the full label. */
+  value?: string;
+  /** Optional secondary description shown under the option text. */
+  desc?: string;
 }
 
 interface ParsedQuestion {
@@ -12,6 +20,12 @@ interface ParsedQuestion {
   answer: string;
   prompt: string;
   options: QuestionOption[];
+  /** Reviewable body shown above the options (e.g. a consolidated summary the
+   *  user must confirm). Only set for confirmation-style sections. */
+  context?: string;
+  /** True for confirmation sections (content → "is this correct?") so the card
+   *  can be labelled distinctly from a 1:1 question. */
+  confirm?: boolean;
 }
 
 const ANSWER_LINE = /^([ \t]*(?:[-*+]\s*)?\[Answer\]:[ \t]*)(.*)$/gm;
@@ -28,6 +42,126 @@ const ANSWER_LINE = /^([ \t]*(?:[-*+]\s*)?\[Answer\]:[ \t]*)(.*)$/gm;
 const Q_HEADING = /^\s*#{1,6}\s*Q(?:uestion)?\s*\d*\s*(?:\([^)]*\)\s*)?(?:[.):\-–—]\s*)?(.+?)\s*#*\s*$/i;
 
 const OPTION_LINE = /^\s*(?:[-*+]\s*)?(?:\*\*)?(?:\[([A-Za-z])\]|([A-Za-z])[).:])\s*(?:\*\*)?\s*(.+?)\s*$/;
+
+/** Strip a single pair of surrounding quotes from a scalar value. */
+function stripQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (
+    trimmed.length >= 2 &&
+    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+/**
+ * Parse the fenced ```question block format some stages emit instead of the
+ * `## Q1` + `- A.` layout, e.g.:
+ *
+ *   ```question
+ *   prompt: "…?"
+ *   header: …
+ *   multiSelect: false
+ *   options:
+ *     - label: Keep changes
+ *       description: …
+ *     - label: Discard and pull
+ *   ```
+ *
+ * The chosen option writes its full label into `[Answer]:`. Returns undefined
+ * when the section has no such block.
+ */
+function parseFencedQuestion(
+  section: string,
+): { prompt?: string; options: QuestionOption[] } | undefined {
+  const fence = section.match(/```+\s*question\b[^\n]*\n([\s\S]*?)```/i);
+  if (!fence) {
+    return undefined;
+  }
+  const lines = fence[1].split(/\r?\n/);
+  let prompt: string | undefined;
+  let header: string | undefined;
+  const options: QuestionOption[] = [];
+  let inOptions = false;
+  for (const line of lines) {
+    if (/^\s*options\s*:\s*$/i.test(line)) {
+      inOptions = true;
+      continue;
+    }
+    const labelMatch = line.match(/^\s*-\s*label\s*:\s*(.+?)\s*$/i);
+    if (labelMatch) {
+      const label = stripQuotes(labelMatch[1]);
+      options.push({
+        key: String(options.length + 1),
+        text: label,
+        value: label,
+      });
+      inOptions = true;
+      continue;
+    }
+    const descMatch = line.match(/^\s*description\s*:\s*(.+?)\s*$/i);
+    if (descMatch && options.length > 0) {
+      options[options.length - 1].desc = stripQuotes(descMatch[1]);
+      continue;
+    }
+    if (!inOptions) {
+      const promptMatch = line.match(/^\s*prompt\s*:\s*(.+?)\s*$/i);
+      if (promptMatch) {
+        prompt = stripQuotes(promptMatch[1]);
+        continue;
+      }
+      const headerMatch = line.match(/^\s*header\s*:\s*(.+?)\s*$/i);
+      if (headerMatch) {
+        header = stripQuotes(headerMatch[1]);
+      }
+    }
+  }
+  if (options.length === 0 && !prompt && !header) {
+    return undefined;
+  }
+  return { prompt: prompt ?? header, options };
+}
+
+/**
+ * Detect a trailing run of plain (non-lettered) bullet choices, e.g. a
+ * confirmation section that ends with:
+ *   - Looks correct
+ *   - Request changes
+ * These carry no `A)`/`[A]` key, so the normal option parser misses them.
+ * We only take the LAST contiguous run of short, colon-free, non-bold bullets
+ * (summary bullets like `- **Q1 → A**: …` are bold + contain a colon, so the
+ * backward scan stops before them). Returns [] when there is no such run.
+ */
+function trailingPlainChoices(lines: string[]): string[] {
+  const bullets: string[] = [];
+  for (const line of lines) {
+    const m = line.match(/^\s*[-*+]\s+(.+?)\s*$/);
+    if (m) {
+      bullets.push(m[1].trim());
+    }
+  }
+  if (bullets.length < 2) {
+    return [];
+  }
+  const choiceLike = (txt: string): boolean =>
+    txt.length > 0 &&
+    txt.length <= 80 &&
+    !txt.includes("**") &&
+    !/[:：]/.test(txt) &&
+    !/^\[[A-Za-z]\]/.test(txt) &&
+    !/^[A-Za-z][).:]/.test(txt);
+  const run: string[] = [];
+  for (let k = bullets.length - 1; k >= 0; k--) {
+    if (choiceLike(bullets[k])) {
+      run.unshift(bullets[k]);
+    } else {
+      break;
+    }
+  }
+  return run.length >= 2 ? run : [];
+}
 
 /**
  * Parses the human-turn format emitted by AI-DLC. The answer marker is the
@@ -53,6 +187,21 @@ function parseQuestions(text: string): ParsedQuestion[] {
   return markers.map((marker, index) => {
     const previousEnd = index === 0 ? 0 : markers[index - 1].end;
     const section = text.slice(previousEnd, marker.start);
+
+    // Fenced ```question blocks carry their own prompt + labelled options and
+    // are parsed as a whole; the lettered-heading path below is the fallback
+    // for the `## Q1` + `- A.` layout.
+    const fenced = parseFencedQuestion(section);
+    if (fenced && fenced.options.length > 0) {
+      return {
+        answerStart: marker.answerStart,
+        answerEnd: marker.answerEnd,
+        answer: marker.answer,
+        prompt: (fenced.prompt ?? t("Question {0}", index + 1)).trim(),
+        options: fenced.options,
+      };
+    }
+
     const lines = section.split(/\r?\n/);
     const options: QuestionOption[] = [];
     for (const line of lines) {
@@ -73,14 +222,63 @@ function parseQuestions(text: string): ParsedQuestion[] {
       .filter((line) => !OPTION_LINE.test(line));
     const questionLine = usefulLines.find((line) => /[?？]$/.test(line)) ?? usefulLines.at(-1) ?? t("Question {0}", index + 1);
 
+    const prompt = (qHeading?.[1] ?? labelled?.[1] ?? questionLine)
+      .replace(/^\*\*|\*\*$/g, "")
+      .trim();
+
+    // Confirmation style: content presented for review, ending in plain bullet
+    // choices ("- Looks correct" / "- Request changes"). Recognise these as
+    // options (when none were lettered) and surface the reviewable body so the
+    // user can judge correctness — not just the trailing question.
+    let context: string | undefined;
+    let confirm = false;
+    if (options.length === 0) {
+      const choices = trailingPlainChoices(lines);
+      const hasQuestion = usefulLines.some((line) => /[?？]$/.test(line));
+      if (choices.length >= 2 && hasQuestion) {
+        for (const [i, text] of choices.entries()) {
+          options.push({ key: String(i + 1), text, value: text });
+        }
+        confirm = true;
+        const chosen = new Set(choices);
+        const body = lines
+          .filter((line) => {
+            const tr = line.trim();
+            if (!tr) {
+              return true; // keep blanks for readability
+            }
+            const bullet = tr.match(/^[-*+]\s+(.+?)$/);
+            if (bullet && chosen.has(bullet[1].trim())) {
+              return false; // option bullet — rendered as a button
+            }
+            if (tr === prompt || tr.replace(/^#{1,6}\s*/, "") === prompt) {
+              return false; // shown as the card prompt
+            }
+            if (/^#{1,6}\s*$/.test(tr)) {
+              return false;
+            }
+            if (/^([-*_])\1{2,}$/.test(tr)) {
+              return false; // horizontal rule
+            }
+            return true;
+          })
+          .join("\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+        if (body) {
+          context = body;
+        }
+      }
+    }
+
     return {
       answerStart: marker.answerStart,
       answerEnd: marker.answerEnd,
       answer: marker.answer,
-      prompt: (qHeading?.[1] ?? labelled?.[1] ?? questionLine)
-        .replace(/^\*\*|\*\*$/g, "")
-        .trim(),
+      prompt,
       options,
+      context,
+      confirm,
     };
   });
 }
@@ -186,23 +384,48 @@ export class QuestionDetailPanel {
       .replace(/"/g, "&quot;");
   }
 
+  /** Minimal, safe markdown for the confirmation context block: escape, then
+   *  render **bold** and drop leading heading hashes. Newlines are preserved
+   *  by the block's white-space: pre-wrap, so bullets/lists show as written. */
+  private static md(value: string): string {
+    return QuestionDetailPanel.esc(value)
+      .replace(/^\s*#{1,6}\s+/gm, "")
+      .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+  }
+
   private static html(questions: ParsedQuestion[]): string {
     const esc = QuestionDetailPanel.esc;
     const rows = questions.length === 0
       ? `<p class="empty">${esc(t("No answer fields found in this questions file."))}</p>`
       : questions.map((question, index) => {
           const current = question.answer.trim().toUpperCase();
-          const hasOption = question.options.some((option) => option.key === current);
+          const valueOf = (option: QuestionOption): string =>
+            (option.value ?? option.key).trim();
+          const hasOption = question.options.some(
+            (option) => valueOf(option).toUpperCase() === current,
+          );
           const options = question.options.map((option) => {
-            // Only the option letter is adopted as the answer (data-key), so a
-            // selection writes e.g. "A" rather than "A: full text".
-            const selected = current === option.key ? " selected" : "";
-            return `<button class="option${selected}" data-index="${index}" data-key="${esc(option.key)}"><b>${esc(option.key)}</b><span>${esc(option.text)}</span></button>`;
+            const value = valueOf(option);
+            // The adopted answer (data-key) is the option's value: a letter for
+            // `## Q1`/`- A.` formats, or the full label for fenced ```question
+            // options — so the written `[Answer]:` matches the source format.
+            const selected = value.toUpperCase() === current ? " selected" : "";
+            const desc = option.desc
+              ? `<small class="desc">${esc(option.desc)}</small>`
+              : "";
+            return `<button class="option${selected}" data-index="${index}" data-key="${esc(value)}"><b>${esc(option.key)}</b><span>${esc(option.text)}${desc}</span></button>`;
           }).join("");
           const answered = `<div class="answered" id="answered-${index}"${question.answer ? "" : " hidden"}>${esc(t("Current answer: {0}", question.answer))}</div>`;
-          return `<section class="question">
-            <div class="number">${esc(t("Question {0}", index + 1))}</div>
+          const number = question.confirm
+            ? t("Confirmation")
+            : t("Question {0}", index + 1);
+          const context = question.context
+            ? `<div class="context">${QuestionDetailPanel.md(question.context)}</div>`
+            : "";
+          return `<section class="question${question.confirm ? " confirm" : ""}">
+            <div class="number">${esc(number)}</div>
             <h2>${esc(question.prompt)}</h2>
+            ${context}
             ${options ? `<div class="options">${options}</div>` : `<p class="hint">${esc(t("Enter your response below."))}</p>`}
             <button class="direct-toggle${!hasOption && question.answer ? " selected" : ""}" data-direct="${index}">
               <b>✎</b><span>${esc(t("Direct input"))}</span>
@@ -224,9 +447,14 @@ export class QuestionDetailPanel {
   button { font: inherit; cursor: pointer; } .option { display: flex; gap: 10px; align-items: flex-start; width: 100%; box-sizing: border-box; min-height: 40px; padding: 10px 12px; text-align: left; color: var(--vscode-foreground); background: var(--vscode-button-secondaryBackground); border: 1px solid var(--vscode-panel-border, #8884); border-radius: 7px; }
   .option:hover { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground); } .option b { flex: 0 0 auto; color: var(--vscode-button-foreground); background: var(--vscode-button-background); padding: 2px 7px; border-radius: 4px; }
   .option.selected { border-color: var(--vscode-focusBorder); background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+  .option span { display: flex; flex-direction: column; gap: 3px; } .option .desc { color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.4; }
   .direct-toggle { display: flex; gap: 10px; align-items: center; width: 100%; box-sizing: border-box; margin-top: 12px; min-height: 40px; padding: 10px 12px; text-align: left; color: var(--vscode-foreground); background: var(--vscode-button-secondaryBackground); border: 1px solid var(--vscode-panel-border, #8884); border-radius: 7px; } .direct-toggle:hover { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground); } .direct-toggle b { color: var(--vscode-button-foreground); background: var(--vscode-button-background); padding: 2px 7px; border-radius: 4px; } .direct-toggle.selected { border-color: var(--vscode-focusBorder); background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   .direct { margin-top: 10px; } textarea { box-sizing: border-box; width: 100%; min-height: 78px; resize: vertical; padding: 8px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, #8884); }
   .answered { margin-top: 12px; font-size: 12px; color: var(--vscode-descriptionForeground); }
+  .question.confirm { border-color: var(--vscode-focusBorder, #3b82f6); }
+  .question.confirm .number { color: var(--vscode-charts-blue, #3b82f6); }
+  .context { white-space: pre-wrap; margin: 0 0 14px; padding: 12px 14px; font-size: 13px; line-height: 1.55; color: var(--vscode-foreground); background: var(--vscode-textBlockQuote-background, #8881); border-left: 3px solid var(--vscode-focusBorder, #3b82f6); border-radius: 6px; }
+  .context b { color: var(--vscode-foreground); }
 </style></head><body><h1>${esc(t("AI-DLC Questions"))}</h1><p class="intro">${esc(t("Select an option to apply it immediately, or enter a custom response."))}</p>${rows}
 <script>
   const vscodeApi = acquireVsCodeApi();

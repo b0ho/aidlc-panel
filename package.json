@@ -2,7 +2,7 @@
   "name": "aidlc-panel",
   "displayName": "AI-DLC Panel",
   "description": "%ext.description%",
-  "version": "0.7.0",
+  "version": "0.9.9",
   "publisher": "foundA",
   "l10n": "./l10n",
   "engines": {
@@ -16,6 +16,48 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "AI-DLC Panel",
+      "properties": {
+        "aidlcPanel.autoSubmitPrompts": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "%config.autoSubmitPrompts%"
+        },
+        "aidlcPanel.customActions": {
+          "type": "array",
+          "scope": "resource",
+          "markdownDescription": "%config.customActions%",
+          "default": [],
+          "items": {
+            "type": "object",
+            "required": [
+              "label",
+              "prompt"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "%config.customActions.id%"
+              },
+              "label": {
+                "type": "string",
+                "description": "%config.customActions.label%"
+              },
+              "prompt": {
+                "type": "string",
+                "description": "%config.customActions.prompt%"
+              },
+              "newSession": {
+                "type": "boolean",
+                "default": true,
+                "description": "%config.customActions.newSession%"
+              }
+            }
+          }
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -37,6 +79,10 @@
           "name": "%view.actions.name%"
         },
         {
+          "id": "aidlcPanelFeatures",
+          "name": "%view.features.name%"
+        },
+        {
           "id": "aidlcPanelProgress",
           "name": "%view.progress.name%"
         },
@@ -45,12 +91,21 @@
           "name": "%view.artifacts.name%"
         },
         {
+          "id": "aidlcPanelUsage",
+          "name": "%view.usage.name%"
+        },
+        {
           "id": "aidlcPanelReference",
           "name": "%view.reference.name%"
         },
         {
           "id": "aidlcPanelTips",
           "name": "%view.tips.name%"
+        },
+        {
+          "id": "aidlcPanelNotepad",
+          "name": "%view.notepad.name%",
+          "type": "webview"
         }
       ]
     },
@@ -59,6 +114,30 @@
         "command": "aidlcPanel.refresh",
         "title": "%cmd.refresh%",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "aidlcPanel.selectWorkspace",
+        "title": "%cmd.selectWorkspace%",
+        "icon": "$(root-folder)"
+      },
+      {
+        "command": "aidlcPanel.addCustomAction",
+        "title": "%cmd.addCustomAction%",
+        "icon": "$(add)"
+      },
+      {
+        "command": "aidlcPanel.runCustomAction",
+        "title": "%cmd.runCustomAction%"
+      },
+      {
+        "command": "aidlcPanel.editCustomAction",
+        "title": "%cmd.editCustomAction%",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "aidlcPanel.deleteCustomAction",
+        "title": "%cmd.deleteCustomAction%",
+        "icon": "$(trash)"
       },
       {
         "command": "aidlcPanel.setLanguage",
@@ -141,6 +220,34 @@
         "title": "%cmd.probeChatCommands%"
       },
       {
+        "command": "aidlcPanel.probeTokenUsage",
+        "title": "%cmd.probeTokenUsage%"
+      },
+      {
+        "command": "aidlcPanel.refreshUsage",
+        "title": "%cmd.refreshUsage%",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "aidlcPanel.usageScopeGlobal",
+        "title": "%cmd.usageScopeGlobal%",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "aidlcPanel.usageScopeWorkspace",
+        "title": "%cmd.usageScopeWorkspace%",
+        "icon": "$(root-folder)"
+      },
+      {
+        "command": "aidlcPanel.usagePeriod",
+        "title": "%cmd.usagePeriod%",
+        "icon": "$(calendar)"
+      },
+      {
+        "command": "aidlcPanel.toggleUsageTracking",
+        "title": "%cmd.toggleUsageTracking%"
+      },
+      {
         "command": "aidlcPanel.parkToggle",
         "title": "%cmd.parkToggle%",
         "icon": "$(debug-pause)"
@@ -202,6 +309,26 @@
           "group": "navigation@2"
         },
         {
+          "command": "aidlcPanel.usageScopeGlobal",
+          "when": "view == aidlcPanelUsage && !aidlcPanel.usageGlobal",
+          "group": "navigation@0"
+        },
+        {
+          "command": "aidlcPanel.usageScopeWorkspace",
+          "when": "view == aidlcPanelUsage && aidlcPanel.usageGlobal",
+          "group": "navigation@0"
+        },
+        {
+          "command": "aidlcPanel.usagePeriod",
+          "when": "view == aidlcPanelUsage",
+          "group": "navigation@1"
+        },
+        {
+          "command": "aidlcPanel.refreshUsage",
+          "when": "view == aidlcPanelUsage",
+          "group": "navigation@2"
+        },
+        {
           "command": "aidlcPanel.showAuxOn",
           "when": "view == aidlcPanelArtifacts && !aidlcPanel.showAux",
           "group": "navigation@0"
@@ -210,19 +337,29 @@
           "command": "aidlcPanel.showAuxOff",
           "when": "view == aidlcPanelArtifacts && aidlcPanel.showAux",
           "group": "navigation@0"
-        },
-        {
-          "command": "aidlcPanel.setLanguage",
-          "when": "view == aidlcPanelActions",
-          "group": "navigation@1"
-        },
-        {
-          "command": "aidlcPanel.refresh",
-          "when": "view == aidlcPanelActions",
-          "group": "navigation@9"
         }
       ],
       "view/item/context": [
+        {
+          "command": "aidlcPanel.editCustomAction",
+          "when": "view == aidlcPanelActions && viewItem == custom-action",
+          "group": "inline@0"
+        },
+        {
+          "command": "aidlcPanel.deleteCustomAction",
+          "when": "view == aidlcPanelActions && viewItem == custom-action",
+          "group": "inline@1"
+        },
+        {
+          "command": "aidlcPanel.editCustomAction",
+          "when": "view == aidlcPanelActions && viewItem == custom-action",
+          "group": "1_actions@0"
+        },
+        {
+          "command": "aidlcPanel.deleteCustomAction",
+          "when": "view == aidlcPanelActions && viewItem == custom-action",
+          "group": "1_actions@1"
+        },
         {
           "command": "aidlcPanel.viewArtifact",
           "when": "view == aidlcPanelArtifacts && viewItem == artifact-questions",

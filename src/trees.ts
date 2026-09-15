@@ -13,6 +13,7 @@ import {
   StageStatus,
 } from "./model";
 import { ReviewState } from "./review";
+import { fmtCredits, UsageStore } from "./usage";
 
 /** Auxiliary per-stage file that is not a formal artifact but useful to see
  *  alongside them: the observation diary. (Q&A `*-questions.md` files are
@@ -82,6 +83,7 @@ function statusIcon(status: StageStatus): vscode.ThemeIcon {
 
 type ProgressNode =
   | { kind: "message"; text: string }
+  | { kind: "usageTotal" }
   | { kind: "phase"; phase: PhaseModel }
   | { kind: "stage"; stage: StageModel };
 
@@ -93,12 +95,55 @@ export class ProgressProvider
 
   private static readonly HIDE_COMPLETED_KEY = "aidlcPanel.hideCompleted";
   private static readonly HIDE_SKIPPED_KEY = "aidlcPanel.hideSkipped";
+  private static readonly EXPAND_KEY = "aidlcPanel.progress.expand";
 
   constructor(
     private readonly store: PanelStore,
     private readonly memento: vscode.Memento,
+    private readonly usage?: UsageStore,
   ) {
     store.onDidChange(() => this._emitter.fire());
+    // Per-stage credit badges track usage refreshes too.
+    usage?.onDidChange(() => this._emitter.fire());
+  }
+
+  /** Stable id for a collapsible node, or undefined for leaves we don't track. */
+  private idOf(node: ProgressNode): string | undefined {
+    return node.kind === "phase" ? `phase:${node.phase.phase}` : undefined;
+  }
+
+  /** Saved expand/collapse overrides (id → expanded). Absent ids use the
+   *  node's default state. */
+  private expandState(): Record<string, boolean> {
+    return this.memento.get<Record<string, boolean>>(
+      ProgressProvider.EXPAND_KEY,
+      {},
+    );
+  }
+
+  /** Collapsible state for a node, honoring the user's saved choice so tree
+   *  expansion survives an IDE reload. */
+  private collapsibleFor(
+    id: string,
+    defaultExpanded: boolean,
+  ): vscode.TreeItemCollapsibleState {
+    const saved = this.expandState()[id];
+    const expanded = saved === undefined ? defaultExpanded : saved;
+    return expanded
+      ? vscode.TreeItemCollapsibleState.Expanded
+      : vscode.TreeItemCollapsibleState.Collapsed;
+  }
+
+  /** Record a node's expand/collapse so it is restored after a reload. */
+  async setExpanded(node: ProgressNode, expanded: boolean): Promise<void> {
+    const id = this.idOf(node);
+    if (!id) {
+      return;
+    }
+    await this.memento.update(ProgressProvider.EXPAND_KEY, {
+      ...this.expandState(),
+      [id]: expanded,
+    });
   }
 
   /** Whether completed stages are collapsed out of the tree. */
@@ -168,12 +213,30 @@ export class ProgressProvider
     if (node.kind === "message") {
       return new vscode.TreeItem(node.text, vscode.TreeItemCollapsibleState.None);
     }
+    if (node.kind === "usageTotal") {
+      // Stable, cumulative token usage for the whole active intent. Unlike a
+      // single stage badge, this keeps growing as the workflow moves between
+      // stages and across sessions (e.g. after a context reset), so it never
+      // appears to "reset" to the latest session.
+      const total = this.usage?.activeIntentTotal();
+      const item = new vscode.TreeItem(
+        t("Intent usage: {0} credits", fmtCredits(total?.credits ?? 0)),
+        vscode.TreeItemCollapsibleState.None,
+      );
+      item.description = total ? t("{0} turns", total.turns) : "";
+      item.iconPath = new vscode.ThemeIcon("graph");
+      item.tooltip = new vscode.MarkdownString(
+        `${t("Cumulative token usage for the active intent, across all stages and sessions.")}\n\n` +
+          t("Per-stage badges below show each stage's own usage."),
+      );
+      item.contextValue = "usage-total";
+      return item;
+    }
     if (node.kind === "phase") {
       const p = node.phase;
-      const item = new vscode.TreeItem(
-        p.label,
-        vscode.TreeItemCollapsibleState.Expanded,
-      );
+      const id = `phase:${p.phase}`;
+      const item = new vscode.TreeItem(p.label, this.collapsibleFor(id, true));
+      item.id = id;
       item.description =
         p.total === 0
           ? "— " + t("all skipped")
@@ -187,11 +250,20 @@ export class ProgressProvider
       `${s.number} ${s.name}`,
       vscode.TreeItemCollapsibleState.None,
     );
-    item.description = statusLabel(s.status);
+    // Status label, plus a credit badge when this stage has attributed usage.
+    const stageUsage = this.usage?.stageUsage(s.slug);
+    item.description =
+      stageUsage && stageUsage.credits > 0
+        ? `${statusLabel(s.status)} · ⚡ ${fmtCredits(stageUsage.credits)}`
+        : statusLabel(s.status);
     const assigned =
       [s.leadAgent, ...s.supportAgents].filter(Boolean).join(" · ") || "orchestrator";
+    const usageLine =
+      stageUsage && stageUsage.credits > 0
+        ? `\n\n${t("Credits: {0}", fmtCredits(stageUsage.credits))} · ${t("{0} turns", stageUsage.turns)}`
+        : "";
     item.tooltip = new vscode.MarkdownString(
-      `**${s.number} ${s.name}**\n\n${s.purpose}\n\n${t("Assigned")}: ${assigned}`,
+      `**${s.number} ${s.name}**\n\n${s.purpose}\n\n${t("Assigned")}: ${assigned}${usageLine}`,
     );
     item.iconPath = statusIcon(s.status);
     item.contextValue = "stage";
@@ -212,7 +284,15 @@ export class ProgressProvider
       return [{ kind: "message", text: model.message ?? t("Unable to load state.") }];
     }
     if (!element) {
-      return (model.phases ?? []).map((phase) => ({ kind: "phase", phase }));
+      const phases: ProgressNode[] = (model.phases ?? []).map((phase) => ({
+        kind: "phase",
+        phase,
+      }));
+      // Lead with the cumulative intent total when there is attributed usage,
+      // so a stable "does not reset" number is always visible at the top.
+      return this.usage?.activeIntentTotal()
+        ? [{ kind: "usageTotal" }, ...phases]
+        : phases;
     }
     if (element.kind === "phase") {
       const stages = this.visibleStages(element.phase.stages);
@@ -230,6 +310,13 @@ export class ProgressProvider
 type ArtifactNode =
   | { kind: "message"; text: string }
   | { kind: "stage"; stage: StageModel }
+  | {
+      kind: "bolt";
+      stage: StageModel;
+      bolt: string;
+      dir: string;
+      artifacts: ArtifactModel[];
+    }
   | { kind: "artifact"; stage: StageModel; artifact: ArtifactModel }
   | { kind: "aux"; stage: StageModel; aux: AuxFile };
 
@@ -244,12 +331,64 @@ export class ArtifactsProvider
     private readonly memento: vscode.Memento,
     private readonly review: ReviewState,
     private readonly git: GitStatus,
-    private readonly root: string,
+    private root: string,
   ) {
     store.onDidChange(() => this._emitter.fire());
     review.onDidChange(() => this._emitter.fire());
     // git status resolves asynchronously; re-render when its badge sets update.
     git.onDidChange(() => this._emitter.fire());
+  }
+
+  private static readonly EXPAND_KEY = "aidlcPanel.artifacts.expand";
+
+  /** Retarget at a different AI-DLC workspace root and re-render. */
+  setRoot(root: string): void {
+    this.root = root;
+    this._emitter.fire();
+  }
+
+  /** Stable id for a collapsible node (stage or Bolt group), else undefined. */
+  private idOf(node: ArtifactNode): string | undefined {
+    if (node.kind === "stage") {
+      return `stage:${node.stage.slug}`;
+    }
+    if (node.kind === "bolt") {
+      return `bolt:${node.stage.slug}/${node.bolt}`;
+    }
+    return undefined;
+  }
+
+  /** Saved expand/collapse overrides (id → expanded). */
+  private expandState(): Record<string, boolean> {
+    return this.memento.get<Record<string, boolean>>(
+      ArtifactsProvider.EXPAND_KEY,
+      {},
+    );
+  }
+
+  /** Collapsible state honoring the user's saved choice so tree expansion
+   *  survives an IDE reload. */
+  private collapsibleFor(
+    id: string,
+    defaultExpanded: boolean,
+  ): vscode.TreeItemCollapsibleState {
+    const saved = this.expandState()[id];
+    const expanded = saved === undefined ? defaultExpanded : saved;
+    return expanded
+      ? vscode.TreeItemCollapsibleState.Expanded
+      : vscode.TreeItemCollapsibleState.Collapsed;
+  }
+
+  /** Record a node's expand/collapse so it is restored after a reload. */
+  async setExpanded(node: ArtifactNode, expanded: boolean): Promise<void> {
+    const id = this.idOf(node);
+    if (!id) {
+      return;
+    }
+    await this.memento.update(ArtifactsProvider.EXPAND_KEY, {
+      ...this.expandState(),
+      [id]: expanded,
+    });
   }
 
   /** Directory holding a stage's files. Prefer the dir of a known artifact
@@ -277,13 +416,13 @@ export class ArtifactsProvider
   /** Questions files and the observation diary for a stage. */
   private auxFiles(stage: StageModel): AuxFile[] {
     const dir = this.stageDir(stage);
-    if (!dir) {
-      return [];
-    }
+    return dir ? this.auxFilesInDir(dir) : [];
+  }
+
+  /** Observation diary (memory.md) found in a specific directory. Shared by
+   *  the flat stage path and per-Bolt groups so each Bolt shows its own diary. */
+  private auxFilesInDir(dir: string): AuxFile[] {
     const out: AuxFile[] = [];
-    // Q&A (`*-questions.md`) files are produced artifacts, so they are listed
-    // in the artifact set (Q&A-tagged there) rather than duplicated here. Only
-    // the observation diary is a genuine aux file.
     const diary = path.join(dir, "memory.md");
     if (fs.existsSync(diary)) {
       out.push({ file: diary, badge: t("Diary") });
@@ -291,15 +430,30 @@ export class ArtifactsProvider
     return out;
   }
 
+  /** Distinct Bolt names present in a stage's artifacts, in first-seen order. */
+  private boltNames(stage: StageModel): string[] {
+    const names: string[] = [];
+    for (const a of stage.artifacts) {
+      if (a.bolt && !names.includes(a.bolt)) {
+        names.push(a.bolt);
+      }
+    }
+    return names;
+  }
+
   private static readonly AUX_KEY = "aidlcPanel.showAux";
 
-  /** Whether to also list gate questions and diaries under each stage. */
+  /** Whether to also list gate questions and diaries under each stage.
+   *  Defaults to true ("show all") so nothing is hidden until the user opts to
+   *  narrow the view to official artifacts only. */
   get showAux(): boolean {
-    return this.memento.get<boolean>(ArtifactsProvider.AUX_KEY, false);
+    return this.memento.get<boolean>(ArtifactsProvider.AUX_KEY, true);
   }
 
   async setShowAux(value: boolean): Promise<void> {
-    await this.memento.update(ArtifactsProvider.AUX_KEY, value || undefined);
+    // Store the boolean explicitly: the default is now true, so collapsing
+    // false to undefined would bounce the toggle back to "show all".
+    await this.memento.update(ArtifactsProvider.AUX_KEY, value);
     await vscode.commands.executeCommand(
       "setContext",
       "aidlcPanel.showAux",
@@ -337,10 +491,12 @@ export class ArtifactsProvider
       );
       const total = reviewable.length;
       const reviewed = reviewable.filter((a) => this.isReviewed(a)).length;
+      const id = `stage:${node.stage.slug}`;
       const item = new vscode.TreeItem(
         `${node.stage.number} ${node.stage.name}`,
-        vscode.TreeItemCollapsibleState.Expanded,
+        this.collapsibleFor(id, true),
       );
+      item.id = id;
       if (total > 0) {
         const changed = reviewable.filter((a) =>
           this.git.state(a.absPath),
@@ -354,6 +510,29 @@ export class ArtifactsProvider
       }
       item.iconPath = statusIcon(node.stage.status);
       item.contextValue = "artifact-group";
+      return item;
+    }
+    if (node.kind === "bolt") {
+      const id = `bolt:${node.stage.slug}/${node.bolt}`;
+      const item = new vscode.TreeItem(node.bolt, this.collapsibleFor(id, true));
+      item.id = id;
+      item.iconPath = new vscode.ThemeIcon("package");
+      item.contextValue = "artifact-bolt";
+      // Per-Bolt reviewed/changed summary (prose artifacts only).
+      const reviewable = node.artifacts.filter(
+        (a) => !isQuestionsArtifact(a.absPath),
+      );
+      const total = reviewable.length;
+      if (total > 0) {
+        const reviewed = reviewable.filter((a) => this.isReviewed(a)).length;
+        const changed = reviewable.filter((a) =>
+          this.git.state(a.absPath),
+        ).length;
+        item.description =
+          t("{0}/{1} reviewed", reviewed, total) +
+          (changed > 0 ? " · " + t("{0} changed", changed) : "");
+      }
+      item.tooltip = node.dir;
       return item;
     }
     if (node.kind === "aux") {
@@ -441,19 +620,59 @@ export class ArtifactsProvider
       }
       return stages.map((stage) => ({ kind: "stage", stage }));
     }
+    // Q&A (`*-questions.md`) artifacts follow the Q&A/diary toggle, just like
+    // the diary.
+    const visible = (artifacts: ArtifactModel[]): ArtifactModel[] =>
+      this.showAux
+        ? artifacts
+        : artifacts.filter((a) => !isQuestionsArtifact(a.absPath));
+
     if (element.kind === "stage") {
-      // Q&A (`*-questions.md`) artifacts are hidden when the Q&A/diary toggle
-      // is off, so the "hide Q&A" filter governs them just like the diary.
-      const visibleArtifacts = this.showAux
-        ? element.stage.artifacts
-        : element.stage.artifacts.filter((a) => !isQuestionsArtifact(a.absPath));
-      const children: ArtifactNode[] = visibleArtifacts.map((artifact) => ({
+      const bolts = this.boltNames(element.stage);
+      // Construction stages nest their output under one directory per Bolt.
+      // Group by Bolt so every Bolt's artifacts show as its own bundle instead
+      // of being flattened (and looking like duplicates) under the stage.
+      if (bolts.length > 0) {
+        const children: ArtifactNode[] = [];
+        // Any non-Bolt files (rare) render directly under the stage first.
+        for (const artifact of visible(
+          element.stage.artifacts.filter((a) => !a.bolt),
+        )) {
+          children.push({ kind: "artifact", stage: element.stage, artifact });
+        }
+        for (const bolt of bolts) {
+          const all = element.stage.artifacts.filter((a) => a.bolt === bolt);
+          const dir = path.dirname(all[0].absPath);
+          children.push({
+            kind: "bolt",
+            stage: element.stage,
+            bolt,
+            dir,
+            artifacts: visible(all),
+          });
+        }
+        return children;
+      }
+
+      const children: ArtifactNode[] = visible(element.stage.artifacts).map(
+        (artifact) => ({ kind: "artifact", stage: element.stage, artifact }),
+      );
+      if (this.showAux) {
+        for (const aux of this.auxFiles(element.stage)) {
+          children.push({ kind: "aux", stage: element.stage, aux });
+        }
+      }
+      return children;
+    }
+
+    if (element.kind === "bolt") {
+      const children: ArtifactNode[] = element.artifacts.map((artifact) => ({
         kind: "artifact",
         stage: element.stage,
         artifact,
       }));
       if (this.showAux) {
-        for (const aux of this.auxFiles(element.stage)) {
+        for (const aux of this.auxFilesInDir(element.dir)) {
           children.push({ kind: "aux", stage: element.stage, aux });
         }
       }

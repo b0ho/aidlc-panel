@@ -117,9 +117,15 @@ export class ReferenceProvider implements vscode.TreeDataProvider<RefNode> {
 
   constructor(
     private readonly store: PanelStore,
-    private readonly root: string,
+    private root: string,
   ) {
     store.onDidChange(() => this._emitter.fire());
+  }
+
+  /** Retarget at a different AI-DLC workspace root and re-render. */
+  setRoot(root: string): void {
+    this.root = root;
+    this._emitter.fire();
   }
 
   private spaceDir(): string | undefined {

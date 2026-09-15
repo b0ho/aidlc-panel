@@ -127,6 +127,11 @@ type StageStatus =
 interface ArtifactModel {
   name: string; // path relative to record dir, posix
   absPath: string; // absolute path
+  // Construction Bolt this artifact belongs to (the directory between
+  // `construction/` and the stage slug), or null for non-Bolt-nested files.
+  // Lets the panel group construction output per Bolt instead of flattening
+  // every Bolt into one list.
+  bolt: string | null;
 }
 
 interface StageModel {
@@ -167,38 +172,37 @@ function argValue(name: string): string | undefined {
 // Mirror of the shipped dashboard's artifact resolver: find <phase>/<slug>/*.md
 // files whose basename matches the stage's produces[] set, including the
 // per-Bolt construction nesting.
+interface BoltDir {
+  dir: string;
+  bolt: string | null;
+}
+
 function artifactFiles(
   recordPath: string,
   phase: string,
   slug: string,
   produces: string[],
-): string[] {
+): Array<{ absPath: string; bolt: string | null }> {
   const allowed = new Set(produces);
   if (allowed.size === 0) return [];
-  const candidates = [join(recordPath, phase, slug)];
-
-  if (phase === "construction") {
-    const constructionDir = join(recordPath, phase);
-    if (existsSync(constructionDir)) {
-      for (const entry of readdirSync(constructionDir)) {
-        const nested = join(constructionDir, entry, slug);
-        if (existsSync(nested)) candidates.push(nested);
-      }
-    }
-  }
-
-  const files = new Set<string>();
-  for (const candidate of candidates) {
-    if (!existsSync(candidate) || !statSync(candidate).isDirectory()) continue;
-    for (const entry of readdirSync(candidate)) {
-      const fullPath = join(candidate, entry);
+  const out: Array<{ absPath: string; bolt: string | null }> = [];
+  const seen = new Set<string>();
+  for (const { dir, bolt } of stageDirs(recordPath, phase, slug)) {
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
+    for (const entry of readdirSync(dir)) {
+      const fullPath = join(dir, entry);
       const artifactName = entry.endsWith(".md") ? entry.slice(0, -3) : "";
-      if (statSync(fullPath).isFile() && allowed.has(artifactName)) {
-        files.add(fullPath);
+      if (
+        statSync(fullPath).isFile() &&
+        allowed.has(artifactName) &&
+        !seen.has(fullPath)
+      ) {
+        seen.add(fullPath);
+        out.push({ absPath: fullPath, bolt });
       }
     }
   }
-  return [...files].sort();
+  return out;
 }
 
 function percentOf(completed: number, total: number): number {
@@ -208,14 +212,14 @@ function percentOf(completed: number, total: number): number {
 // Resolve the on-disk directories that hold a stage's working files, mirroring
 // artifactFiles(): the flat <phase>/<slug> dir plus, for construction, any
 // per-Bolt <construction>/<bolt>/<slug> nesting.
-function stageDirs(recordPath: string, phase: string, slug: string): string[] {
-  const dirs = [join(recordPath, phase, slug)];
+function stageDirs(recordPath: string, phase: string, slug: string): BoltDir[] {
+  const dirs: BoltDir[] = [{ dir: join(recordPath, phase, slug), bolt: null }];
   if (phase === "construction") {
     const constructionDir = join(recordPath, phase);
     if (existsSync(constructionDir)) {
       for (const entry of readdirSync(constructionDir)) {
         const nested = join(constructionDir, entry, slug);
-        if (existsSync(nested)) dirs.push(nested);
+        if (existsSync(nested)) dirs.push({ dir: nested, bolt: entry });
       }
     }
   }
@@ -254,23 +258,30 @@ function stageQuestions(
   recordPath: string,
   phase: string,
   slug: string,
-): { file: string | null; open: number; total: number } {
+): {
+  file: string | null;
+  open: number;
+  total: number;
+  files: Array<{ absPath: string; bolt: string | null }>;
+} {
   let file: string | null = null;
   let open = 0;
   let total = 0;
-  for (const dir of stageDirs(recordPath, phase, slug)) {
+  const files: Array<{ absPath: string; bolt: string | null }> = [];
+  for (const { dir, bolt } of stageDirs(recordPath, phase, slug)) {
     if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
     for (const entry of readdirSync(dir)) {
       if (!entry.endsWith("-questions.md")) continue;
       const full = join(dir, entry);
       if (!statSync(full).isFile()) continue;
+      files.push({ absPath: full, bolt });
       const counts = parseQuestions(readFileSync(full, "utf8"));
       total += counts.total;
       open += counts.open;
       if (file === null || counts.open > 0) file = full;
     }
   }
-  return { file, open, total };
+  return { file, open, total, files };
 }
 
 function buildModel(): unknown {
@@ -328,16 +339,41 @@ function buildModel(): unknown {
       const status: StageStatus = checkbox.suffix.startsWith("SKIP")
         ? "skipped"
         : (checkbox.state as StageStatus);
-      const artifacts = artifactFiles(
+      const questions = stageQuestions(recordPath, entry.phase, entry.slug);
+      const collected = artifactFiles(
         recordPath,
         entry.phase,
         entry.slug,
         entry.produces ?? [],
-      ).map((filePath) => ({
-        name: relative(recordPath, filePath).replaceAll("\\", "/"),
-        absPath: filePath,
+      );
+      // `*-questions.md` Q&A files are genuine artifacts the user acts on, but
+      // most stages do not list them in produces[] (they produce a prose doc,
+      // with the questions file alongside). Include them explicitly so they
+      // always appear (Q&A-tagged, governed by the panel's Q&A visibility
+      // toggle) instead of only when a stage's produced artifact IS a
+      // questions file. Dedup by path so a produces-listed one isn't doubled.
+      const seen = new Set(collected.map((c) => c.absPath));
+      for (const qf of questions.files) {
+        if (!seen.has(qf.absPath)) {
+          seen.add(qf.absPath);
+          collected.push(qf);
+        }
+      }
+      // Sort by Bolt first (nulls last, so non-construction/flat files lead),
+      // then by path, so each Bolt's files stay contiguous.
+      collected.sort((a, b) => {
+        if (a.bolt !== b.bolt) {
+          if (a.bolt === null) return 1;
+          if (b.bolt === null) return -1;
+          return a.bolt.localeCompare(b.bolt);
+        }
+        return a.absPath.localeCompare(b.absPath);
+      });
+      const artifacts = collected.map((c) => ({
+        name: relative(recordPath, c.absPath).replaceAll("\\", "/"),
+        absPath: c.absPath,
+        bolt: c.bolt,
       }));
-      const questions = stageQuestions(recordPath, entry.phase, entry.slug);
       return {
         slug: entry.slug,
         number: entry.number,

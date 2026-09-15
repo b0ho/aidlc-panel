@@ -4,6 +4,7 @@ import { ChangeState } from "./git";
 import { currentLang, t } from "./i18n";
 import { PHASE_LABEL, statusLabel } from "./labels";
 import { isQuestionsArtifact, StageModel } from "./model";
+import { fmtCredits } from "./usage";
 
 // Dot color class per audit event for the timeline.
 const EVENT_CLS: Record<string, string> = {
@@ -139,6 +140,8 @@ export interface StageDetailExtras {
   events: AuditEvent[];
   reviewed: Set<string>; // artifact names marked reviewed
   changeState: (absPath: string) => ChangeState;
+  /** Aggregated credit usage attributed to this stage, if any. */
+  usage?: { credits: number; turns: number };
 }
 
 /**
@@ -266,6 +269,20 @@ export class StageDetailPanel {
     const checks = guide?.checks ?? genericChecks();
     const checkList = checks.map((c) => `<li>${esc(c)}</li>`).join("");
 
+    // Token/credit usage attributed to this stage (best-effort, from Kiro
+    // session logs correlated by time). Only shown when we have a figure.
+    const usageCard =
+      extras.usage && extras.usage.credits > 0
+        ? `<div class="card full usage">
+             <h4>${esc(t("Token usage (credits)"))}</h4>
+             <div class="usage-row">
+               <span class="usage-big">⚡ ${esc(fmtCredits(extras.usage.credits))}</span>
+               <span class="muted">${esc(t("{0} turns", extras.usage.turns))}</span>
+             </div>
+             <div class="muted usage-note">${esc(t("Credits consumed while this stage was active, correlated from Kiro session logs."))}</div>
+           </div>`
+        : "";
+
     // Review counts cover prose artifacts only — Q&A files are answered, not
     // reviewed, so they are excluded from the ratio.
     const reviewable = stage.artifacts.filter((a) => !isQuestionsArtifact(a.name));
@@ -366,6 +383,9 @@ export class StageDetailPanel {
   .tl-label { font-weight: 600; }
   .tl-time { color: var(--vscode-descriptionForeground); margin-left: 8px; }
   .tl-detail { color: var(--vscode-descriptionForeground); margin-top: 2px; }
+  .card.usage .usage-row { display: flex; align-items: baseline; gap: 12px; }
+  .usage-big { font-size: 22px; font-weight: 700; color: var(--vscode-charts-yellow, #d4a017); }
+  .usage-note { font-size: 11px; margin-top: 6px; }
 </style></head><body>
   <div class="eyebrow">${esc(PHASE_LABEL[stage.phase] ?? stage.phase)} · ${esc(t("Stage"))} ${esc(stage.number)}</div>
   <h1>${esc(stage.name)}</h1>
@@ -380,6 +400,8 @@ export class StageDetailPanel {
     <div class="card accent"><h4>${esc(t("What to check in this stage"))}</h4><ul>${checkList}</ul></div>
     <div class="card accent"><h4>${esc(t("Goal of this stage"))}</h4><p class="goal">${esc(goal)}</p></div>
   </div>
+
+  ${usageCard ? `<div class="grid" style="margin-top:12px">${usageCard}</div>` : ""}
 
   <div class="section-title">${esc(t("Artifacts · Review status"))}</div>
   ${reviewBar}
