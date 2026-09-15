@@ -137,7 +137,7 @@ npm run compile
 ```bash
 cd aidlc-panel
 npm install
-npx --yes @vscode/vsce package --allow-missing-repository --skip-license
+npx --yes @vscode/vsce package
 # -> aidlc-panel-<version>.vsix 생성
 ```
 
@@ -152,6 +152,10 @@ kiro --install-extension aidlc-panel-<version>.vsix --force
 
 또는 UI: Extensions 뷰 → `...` 메뉴 → **Install from VSIX...** 설치 후 **Developer: Reload Window** 를 실행해야 새 버전이 활성화됩니다.
 
+## 개인정보 · 데이터
+
+이 확장은 **로컬 파일만 읽습니다.** 워크스페이스의 AI-DLC 상태 파일과 `~/.kiro/sessions`의 Kiro 세션 로그를 **읽기 전용**으로 읽어 화면에 표시할 뿐, 어떤 데이터도 외부로 전송하지 않으며 엔진·세션 파일을 수정하지 않습니다. 검토 표시·토글 등 사용자 설정만 VS Code 로컬 저장소에 보관됩니다.
+
 ## 라이선스
 
-AI-DLC 엔진 상태와 Kiro 세션 로그를 읽기만 하며 변경하지 않는 내부 애드온입니다.
+[MIT](LICENSE) © b0ho

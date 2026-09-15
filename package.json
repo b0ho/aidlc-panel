@@ -2,13 +2,39 @@
   "name": "aidlc-panel",
   "displayName": "AI-DLC Panel",
   "description": "%ext.description%",
-  "version": "0.9.9",
-  "publisher": "foundA",
+  "version": "1.0.0",
+  "publisher": "b0ho",
+  "license": "MIT",
+  "author": {
+    "name": "b0ho"
+  },
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/b0ho/aidlc-panel.git"
+  },
+  "homepage": "https://github.com/b0ho/aidlc-panel#readme",
+  "bugs": {
+    "url": "https://github.com/b0ho/aidlc-panel/issues"
+  },
+  "keywords": [
+    "ai-dlc",
+    "aidlc",
+    "kiro",
+    "token usage",
+    "workflow",
+    "dashboard"
+  ],
+  "galleryBanner": {
+    "color": "#2563EB",
+    "theme": "dark"
+  },
   "l10n": "./l10n",
   "engines": {
     "vscode": "^1.74.0"
   },
   "categories": [
+    "Visualization",
     "Other"
   ],
   "activationEvents": [
