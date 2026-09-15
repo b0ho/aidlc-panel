@@ -1,161 +1,138 @@
 # AI-DLC Panel
 
+**See where your AI-DLC workflow stands, what to do next, and how much it cost — right inside your IDE.**
+
+No more digging through terminal logs or state files. One **AI-DLC** icon in the Activity Bar shows progress, artifacts, review status, and token usage, and lets you continue the workflow. The panel reads engine state **read-only** — it never touches or changes your workflow files.
+
+## What you can do
+
+- **Know where you are** — overall progress, current Phase/Stage, and the next action at a glance.
+- **Review artifacts** — open the files each stage produced, mark them reviewed, and diff against the previous git state.
+- **Answer questions inline** — click through choice questions, or review a summary and approve/request changes for confirmation-style questions.
+- **Track token usage** — Kiro credit consumption per stage, per intent (cumulative), and per session.
+- **Get notified on gates** — a status bar item and notification when the workflow is waiting for your approval.
+- **Continue in one click** — resume the workflow in a fresh Kiro session.
+- **Ask Kiro to review** — hand an artifact to Kiro for review.
+- **Look back** — browse rules, knowledge, Q&A, and activity history read-only.
+
+## Getting started
+
+1. Install the extension.
+2. Run **Developer: Reload Window**.
+3. Open an AI-DLC workspace (a project with `.kiro/tools/aidlc-lib.ts` somewhere in it).
+4. Click the **AI-DLC** icon in the Activity Bar.
+
+On first activation the panel installs a small read-only tool (`panel-model.ts`) into the workspace's `.kiro/tools/`. No setup needed.
+
+**Requirements**
+
+- **VS Code `^1.74.0`** or Kiro IDE
+- **[bun](https://bun.sh)** on your PATH (runs the read-only state tool)
+- An **AI-DLC workspace** — one of the open folders must contain `.kiro/tools/aidlc-lib.ts`. In multi-root workspaces the engine folder is found automatically.
+
+## Views
+
+- **Overview** — active Intent, overall progress, artifact-review bar, next action, and pending reviews.
+- **Tasks** — workflow buttons (Continue workflow / Ask Kiro) plus your custom actions.
+- **Features** — panel utilities: Switch Intent / Park·Resume / Full dashboard / Switch Workspace / Language / Token usage on·off / Refresh. **Switch Intent and Switch Workspace show the current selection on the right.**
+- **Stages** — a Phase → Stage tree with each stage's status (complete, in progress, awaiting approval, revising, pending, skipped). Click a stage for details (what to check, the goal, review status, an execution-history timeline, and this stage's token usage). The top row shows the **cumulative token usage of the current Intent**.
+- **Artifacts & Review** — files grouped by stage, with review mark/unmark, review counts, **new/changed badges** vs git HEAD, diff, and "Ask Kiro to review".
+- **Token Usage** — Kiro credit consumption per session and per stage (see below).
+- **Reference & History** — rules memory, code knowledge (codekb), team knowledge, Q&A, observation diary, and activity history, read-only.
+- **Tips & Help** — Scope, panel usage, and AI-DLC v2 tips in collapsible sections.
+- **Notepad** — a simple per-workspace scratch pad.
+
+## Token usage
+
+The panel reads Kiro's local session logs (`~/.kiro/sessions`) **read-only** to show credit consumption. The unit is Kiro **credits** (not raw tokens); the **context-window usage (%)** is shown too. Both IDE and kiro-cli sessions are recognized.
+
+**Three ways to view it**
+
+1. **Per stage** — each stage shows the credits spent on it; the top of the Stages tree shows the **current Intent's cumulative total**. The stage-detail screen shows it as a card too.
+2. **Per session (Token Usage view)** — a `session → intent → stage → turn` tree showing credits, elapsed time, and context % for each exchange.
+3. **Filters** — from the view title bar you can switch **all workspaces ↔ this workspace** and filter by **month** (all time or a specific month).
+
+**Turn it on/off** — the "Token usage tracking" row in **Features** toggles it (on by default). When off, no session logs are scanned.
+
+> **Accuracy notes**
+> - Per-stage / per-intent attribution is a best-effort **estimate** correlated by time against the workflow audit trail. Per-session and per-turn credits are exact from the logs.
+> - `/clear` and `/compact` make Kiro erase that session's credit records. **To keep usage history, continue in a new session when context fills.** The view shows this reminder at the top.
+> - So these numbers are a **lower bound** based on locally-retained logs and may differ from your account's billed total.
+
+## Common tasks
+
+- **Continue workflow** — the *Continue workflow* button opens a new Kiro session and sends `/aidlc`; the engine resumes from the last checkpoint.
+- **Answer questions** — open `*-questions.md` in the dedicated screen. Choice questions save on click; direct input auto-saves. Confirmation questions show the summary and offer approve / request-changes buttons.
+- **Approval gates** — when the workflow reaches a gate, the status bar shows `⏳ Awaiting approval` and a one-time notification appears; **Open stage** jumps to the detail.
+- **Ask Kiro to review** — opens the target file as context and hands a review prompt to a new Kiro session.
+
+## Commands
+
+Available from the Command Palette (`Ctrl/Cmd+Shift+P`):
+
+| Command | Description |
+| --- | --- |
+| `AI-DLC: Refresh` | Re-read state. |
+| `AI-DLC: Switch Intent` | Change the active Intent. |
+| `AI-DLC: Switch Workspace` | Pick which open AI-DLC project the panel targets. |
+| `AI-DLC: Park / Resume` | Safely pause/resume the workflow. |
+| `AI-DLC: Open Full Dashboard` | Generate and open the HTML dashboard. |
+| `AI-DLC: Ask Kiro` | Open a new Kiro session with the current stage context. |
+| `AI-DLC: Continue Workflow (new session)` | Ask a new Kiro session to continue the workflow. |
+| `AI-DLC: Toggle Token Usage Tracking` | Turn token usage calculation on/off. |
+| `AI-DLC: Probe Token Usage` | Report the usage summary read from local session logs. |
+| `AI-DLC: Set Panel Language` | Choose English / 한국어 / Auto. |
+| `AI-DLC: Probe Chat Commands` | Report the chat/new-session commands this build recognizes. |
+| `AI-DLC: Initialize Panel` | Reinstall the model tool and refresh. |
+
+## Language
+
+The panel language is independent of the IDE: **English / 한국어 / Auto** (follows the IDE). Switch it from the Language row in **Features** or the `AI-DLC: Set Panel Language` command — it applies immediately, no reload needed.
+
+## Privacy & data
+
+This extension **reads local files only.** It reads the workspace's AI-DLC state files and Kiro's session logs under `~/.kiro/sessions` **read-only** to display them; it sends nothing over the network and never modifies engine or session files. Only your own settings (review marks, toggles) are stored in VS Code's local storage.
+
+---
+
+# 한국어
+
 **AI-DLC 워크플로가 지금 어디까지 왔고, 다음에 무엇을 해야 하는지, 그리고 얼마나 썼는지를 IDE 안에서 한눈에 보여주는 패널입니다.**
 
-터미널 로그나 상태 파일을 뒤지지 않아도, Activity Bar의 **AI-DLC** 아이콘 하나로 진행 상황·산출물·검토 현황·토큰 사용량을 확인하고 다음 작업을 이어갈 수 있습니다. 패널은 엔진 상태를 **읽기 전용**으로만 읽습니다. 워크플로 파일을 건드리거나 바꾸지 않으니 안심하고 켜 두세요.
-
-## 이 패널로 할 수 있는 일
-
-- **지금 위치 파악** — 전체 진척도와 현재 Phase·Stage, 다음에 할 일을 요약해서 봅니다.
-- **산출물 검토** — 각 단계가 만든 파일을 열어 확인하고, 검토 완료를 표시하고, git 이전 상태와 비교합니다.
-- **질의응답 바로 처리** — 선택형 질문은 클릭으로, 확인형(요약 → "이대로 진행할까요?") 질문은 내용을 보고 승인/수정 선택으로 즉시 답합니다.
-- **토큰 사용량 확인** — 진행 단계별·Intent 누적·세션별로 크레딧 소비를 봅니다.
-- **승인 대기 확인** — 워크플로가 승인을 기다리면 알림과 상태 표시줄로 알려 줍니다.
-- **바로 이어가기** — 버튼 한 번으로 새 세션에서 워크플로를 이어서 진행합니다.
-- **Kiro에 검토 요청** — 산출물을 Kiro에게 검토해 달라고 바로 요청합니다.
-- **되짚어 보기** — 규칙·지식·질의응답·활동 이력을 읽기 전용으로 탐색합니다.
+터미널 로그나 상태 파일을 뒤지지 않아도, Activity Bar의 **AI-DLC** 아이콘 하나로 진행 상황·산출물·검토 현황·토큰 사용량을 확인하고 다음 작업을 이어갈 수 있습니다. 패널은 엔진 상태를 **읽기 전용**으로만 읽으며, 워크플로 파일을 건드리거나 바꾸지 않습니다.
 
 ## 시작하기
 
-1. 확장을 설치합니다(팀에서 받은 `.vsix`를 **Extensions 뷰 → `...` → Install from VSIX...** 로 설치하거나, 아래 [개발 · 배포](#개발--배포)의 CLI 명령을 사용).
-2. 설치 후 **Developer: Reload Window** 를 실행합니다.
+1. 확장을 설치합니다.
+2. **Developer: Reload Window** 를 실행합니다.
 3. AI-DLC 워크스페이스(폴더 어딘가에 `.kiro/tools/aidlc-lib.ts` 가 있는 프로젝트)를 엽니다.
-4. 왼쪽 Activity Bar에서 **AI-DLC** 아이콘을 클릭합니다.
+4. Activity Bar에서 **AI-DLC** 아이콘을 클릭합니다.
 
-> 최초 활성화 시, 패널이 상태를 읽는 데 필요한 읽기 전용 도구(`panel-model.ts`)를 워크스페이스의 `.kiro/tools/`에 자동으로 설치합니다. 별도 설정은 필요 없습니다.
-
-**필요한 것**
-
-- **VS Code `^1.74.0`** 또는 Kiro IDE
-- **[bun](https://bun.sh)** — 상태를 읽는 도구를 실행합니다. `bun`이 PATH에 있어야 합니다.
-- **AI-DLC 워크스페이스** — 열린 폴더 중 하나에 `.kiro/tools/aidlc-lib.ts`가 있어야 패널이 켜집니다. 멀티루트 워크스페이스에서는 엔진이 있는 폴더를 자동으로 찾습니다.
+**필요한 것**: VS Code `^1.74.0` 또는 Kiro IDE · PATH의 **[bun](https://bun.sh)** · `.kiro/tools/aidlc-lib.ts`가 있는 AI-DLC 워크스페이스.
 
 ## 화면 구성
 
-**AI-DLC** 아이콘을 열면 여러 개의 뷰가 나타납니다.
-
-- **현황** — 활성 Intent, 전체 진척도, 산출물 검토 진행바, 다음 할 일, 검토가 남은 산출물을 요약합니다. 패널을 열면 가장 먼저 보이는 화면입니다.
-- **작업(Tasks)** — 워크플로 실행 버튼입니다: 이어서 진행하기(새 세션) / Kiro에 물어보기, 그리고 직접 만든 커스텀 작업과 "커스텀 작업 추가" 행.
-- **기능(Features)** — 패널 유틸리티입니다: Intent 전환 / 파킹·재개 / 전체 대시보드 / 워크스페이스 전환 / 언어 / 토큰 사용량 계산 켜기·끄기 / 새로고침. **Intent 전환·워크스페이스 전환 행에는 현재 선택이 오른쪽에 표시**됩니다.
-- **진행 단계** — Phase → Stage 트리로 각 단계 상태(완료·진행 중·승인 대기·수정 중·대기·건너뜀)를 보여 줍니다. 단계를 클릭하면 상세 패널이 열려 "이 단계에서 확인할 내용 / 목표", 산출물 검토 현황, 실행 이력 타임라인, 그리고 이 단계의 토큰 사용량을 볼 수 있습니다. 트리 맨 위에는 **현재 Intent의 누적 토큰 사용량**이 표시됩니다.
-- **산출물 · 검토** — 단계별로 만들어진 파일을 모아 봅니다. 검토 완료 표시/해제, 검토 진행 개수, git HEAD 대비 **변경/신규 배지**, 변경 비교, Kiro에 검토 요청을 제공합니다.
-- **토큰 사용량** — Kiro 크레딧 소비를 세션별·단계별로 봅니다(아래 [토큰 사용량](#토큰-사용량) 참고).
-- **참조 · 이력** — 규칙 메모리, 코드 지식(codekb), 팀 지식, 질의응답, 관찰 일지, 활동 이력을 읽기 전용으로 둘러봅니다.
-- **팁 · 도움말** — Scope, 확장 사용법, AI-DLC v2 사용법 팁을 접이식 섹션으로 제공합니다.
-- **메모장** — 워크스페이스에 저장되는 간단한 메모 공간입니다.
-
-## 자주 하는 작업
-
-### 이어서 진행하기
-
-**작업(Tasks)** 의 **이어서 진행하기** 버튼을 누르면 새 Kiro 세션에서 `/aidlc` 이어가기를 요청합니다. 엔진이 활성 Intent를 해석해 마지막 체크포인트에서 바로 이어갑니다.
-
-### 질의응답 처리
-
-`*-questions.md`를 전용 질문 화면에서 처리합니다.
-
-- **선택형 질문** — 보기(A/B/C…)를 클릭하면 즉시 답변이 저장됩니다. 직접 입력란에 내용을 쓰면 그 내용을 답변으로 자동 저장합니다.
-- **확인형 질문** — 요약 내용을 제시하고 "이대로 진행할까요?"를 묻는 경우, 요약 본문을 함께 보여 주고 **승인 / 수정 요청** 같은 선택지를 버튼으로 제공합니다. 카드에는 "확인"으로 구분 표시됩니다.
-
-### 승인 대기 알림
-
-워크플로가 게이트(승인 대기)에 도달하면 상태 표시줄에 `⏳ 승인 대기: <단계>`가 표시되고 알림이 한 번 뜹니다. 알림의 **단계 열기**를 누르면 해당 단계 상세로 이동합니다.
-
-### Kiro에 검토 요청
-
-산출물 항목이나 단계 상세에서 **Kiro에 검토 요청**을 누르면 대상 파일을 에디터에 열어 컨텍스트로 만들고, 새 Kiro 세션에 검토 프롬프트를 전달합니다. (새 세션 명령이 없는 빌드에서는 현재 채팅을 재사용합니다. 어떤 명령이 인식되는지 확인하려면 명령 팔레트에서 **AI-DLC: 채팅 명령 탐지**를 실행하세요.)
-
-### 진행 단계 토글
-
-**진행 단계** 뷰 제목 표시줄에서 완료 단계·건너뛴 단계를 접거나 펼칠 수 있습니다. 토글 상태는 워크스페이스별로 저장됩니다.
+- **현황** — 활성 Intent, 전체 진척도, 산출물 검토 진행바, 다음 할 일, 검토 대기 요약.
+- **작업(Tasks)** — 이어서 진행하기 / Kiro에 물어보기 + 커스텀 작업.
+- **기능(Features)** — Intent 전환 / 파킹·재개 / 전체 대시보드 / 워크스페이스 전환 / 언어 / 토큰 사용량 켜기·끄기 / 새로고침. **Intent·워크스페이스 전환 행에는 현재 선택이 오른쪽에 표시**됩니다.
+- **진행 단계** — Phase→Stage 트리와 상태 표시, 단계 상세(확인 사항·목표·검토 현황·실행 이력·이 단계 토큰 사용량). 맨 위에 **현재 Intent 누적 사용량** 표시.
+- **산출물 · 검토** — 검토 표시/해제, git HEAD 대비 변경·신규 배지, 변경 비교, Kiro에 검토 요청.
+- **토큰 사용량** — Kiro 크레딧 소비를 세션별·단계별로 표시(아래 참고).
+- **참조 · 이력**, **팁 · 도움말**, **메모장**.
 
 ## 토큰 사용량
 
-Kiro가 로컬에 남기는 세션 로그(`~/.kiro/sessions`)를 **읽기 전용**으로 읽어, 크레딧 소비를 보여 줍니다. 단위는 Kiro **크레딧**(raw 토큰이 아님)이며, 대화 응답마다 갱신되는 **컨텍스트 윈도우 사용률(%)** 도 함께 표시합니다. IDE 세션과 kiro-cli 세션을 모두 인식합니다.
+Kiro의 로컬 세션 로그(`~/.kiro/sessions`)를 **읽기 전용**으로 읽어 크레딧 소비를 보여 줍니다. 단위는 Kiro **크레딧**(raw 토큰 아님)이며 컨텍스트 사용률(%)도 표시합니다. IDE·kiro-cli 세션 모두 인식합니다.
 
-**세 가지 방식으로 봅니다.**
+- **진행 단계별** 크레딧 + 현재 Intent **누적 총합**, **세션별** 트리(`세션→Intent→단계→대화`), **전체/현재 워크스페이스** 전환과 **월별 필터**.
+- **기능(Features)** 뷰에서 계산을 **켜기/끄기**(기본 켜기). 끄면 스캔하지 않습니다.
 
-1. **진행 단계별** — 각 단계 옆에 그 단계에서 쓴 크레딧이, 트리 맨 위에는 현재 Intent의 **누적 총합**이 표시됩니다. 단계 상세 화면에도 카드로 나옵니다.
-2. **세션별(토큰 사용량 뷰)** — `세션 → Intent → 단계 → 대화(턴)` 트리로, 대화 한 번마다 쓴 크레딧·소요 시간·컨텍스트%를 봅니다.
-3. **필터** — 뷰 제목 표시줄에서
-   - **전체 워크스페이스 ↔ 현재 워크스페이스** 전환,
-   - **월별 필터**(전체 기간 또는 특정 월)를 선택할 수 있습니다.
-
-**계산 켜기/끄기** — **기능(Features)** 뷰의 "토큰 사용량 계산" 행으로 언제든 끌 수 있습니다(기본 켜기). 끄면 세션 로그를 스캔하지 않아 부하가 없습니다.
-
-> **알아두기 (정확도)**
-> - 진행 단계·Intent 귀속은 대화 시각과 워크플로 감사(audit) 기록을 대조한 **추정치**입니다. 세션별·대화별 크레딧은 로그에 기록된 정확한 값입니다.
-> - `/clear`·`/compact`(컨텍스트 비우기·압축)를 하면 Kiro가 해당 세션의 크레딧 기록을 지웁니다. **사용 이력을 유지하려면 컨텍스트가 찰 때 새 세션에서 이어가세요.** 뷰 상단에도 이 안내가 표시됩니다.
-> - 따라서 이 패널의 수치는 **로컬에 남은 기록 기준의 하한값**이며, 계정의 실제 과금 총량과는 다를 수 있습니다.
-
-## 주요 명령
-
-명령 팔레트(`Ctrl/Cmd+Shift+P`)에서 사용할 수 있는 명령입니다.
-
-| 명령 | 설명 |
-| --- | --- |
-| `AI-DLC: 새로고침` | 상태를 다시 읽습니다. |
-| `AI-DLC: Intent 전환` | 활성 Intent를 변경합니다. |
-| `AI-DLC: 워크스페이스 전환` | 여러 AI-DLC 프로젝트가 열려 있을 때 대상 프로젝트를 고릅니다. |
-| `AI-DLC: 파킹 / 재개` | 워크플로를 안전하게 중단/재개합니다. |
-| `AI-DLC: 전체 대시보드 열기` | HTML 대시보드를 생성해 엽니다. |
-| `AI-DLC: Kiro에 물어보기` | 현재 단계 컨텍스트로 새 Kiro 세션을 엽니다. |
-| `AI-DLC: 이어서 진행하기 (새 세션)` | 워크플로 이어가기를 새 Kiro 세션에 요청합니다. |
-| `AI-DLC: 토큰 사용량 계산 토글` | 토큰 사용량 계산을 켜거나 끕니다. |
-| `AI-DLC: 토큰 사용량 탐지` | 로컬 세션 로그에서 읽어낸 사용량 요약을 보고합니다. |
-| `AI-DLC: 언어 설정` | 패널 언어를 English / 한국어 / 자동 중에서 고릅니다. |
-| `AI-DLC: 채팅 명령 탐지` | 이 빌드에서 인식되는 채팅/새 세션 명령을 보고합니다. |
-| `AI-DLC: 패널 초기화 (모델 도구 설치)` | 모델 도구를 재설치하고 새로고침합니다. |
-
-## 언어
-
-패널 언어는 IDE와 별개로 **English / 한국어 / 자동**(IDE 언어 따름) 중에서 고를 수 있습니다. **기능(Features)** 뷰의 언어 행 또는 `AI-DLC: 언어 설정` 명령으로 즉시 전환되며, 다시 로드할 필요가 없습니다.
-
-## 동작 방식
-
-- 워크플로 상태는 `aidlc/spaces/<space>/intents/<intent>/aidlc-state.md`와 스테이지 그래프에서 **읽기만** 합니다. 엔진 파일은 절대 수정하지 않습니다.
-- 토큰 사용량은 `~/.kiro/sessions`의 세션 로그를 **읽기 전용**으로 읽습니다. Kiro 세션 파일도 수정하지 않습니다.
-- `aidlc/**/{aidlc-state.md,active-intent}`와 `aidlc/active-space`를 감시해 변경 시 자동으로 새로고침합니다.
-- 검토 완료 표시, 각종 토글·필터 상태는 VS Code 저장소(Memento)에 보관됩니다.
-
-## 개발 · 배포
-
-> 이 아래는 확장을 직접 빌드하거나 팀에 배포하는 사람을 위한 내용입니다. 단순히 사용만 한다면 위 [시작하기](#시작하기)로 충분합니다.
-
-### 소스에서 개발 실행
-
-```bash
-cd aidlc-panel
-npm install
-npm run compile
-```
-
-이후 VS Code에서 `aidlc-panel` 폴더를 열고 `F5`(Run Extension)를 눌러 Extension Development Host에서 실행합니다.
-
-### VSIX 만들기
-
-```bash
-cd aidlc-panel
-npm install
-npx --yes @vscode/vsce package
-# -> aidlc-panel-<version>.vsix 생성
-```
-
-버전은 `package.json`의 `version`을 올린 뒤 다시 패키징하세요. (설치본은 버전이 올라가야 갱신됩니다.)
-
-### 나눠주기 · 설치
-
-```bash
-kiro --install-extension aidlc-panel-<version>.vsix --force
-# VS Code면: code --install-extension aidlc-panel-<version>.vsix --force
-```
-
-또는 UI: Extensions 뷰 → `...` 메뉴 → **Install from VSIX...** 설치 후 **Developer: Reload Window** 를 실행해야 새 버전이 활성화됩니다.
+> **정확도**: Intent·단계 귀속은 시각 기반 **추정치**이고 세션·대화별 크레딧은 정확한 값입니다. `/clear`·`/compact`는 해당 세션의 크레딧 기록을 지우므로 **컨텍스트가 찰 땐 새 세션에서 이어가세요.** 이 수치는 로컬 기록 기준 **하한값**이라 계정 실제 과금과 다를 수 있습니다.
 
 ## 개인정보 · 데이터
 
-이 확장은 **로컬 파일만 읽습니다.** 워크스페이스의 AI-DLC 상태 파일과 `~/.kiro/sessions`의 Kiro 세션 로그를 **읽기 전용**으로 읽어 화면에 표시할 뿐, 어떤 데이터도 외부로 전송하지 않으며 엔진·세션 파일을 수정하지 않습니다. 검토 표시·토글 등 사용자 설정만 VS Code 로컬 저장소에 보관됩니다.
+**로컬 파일만 읽습니다.** AI-DLC 상태 파일과 `~/.kiro/sessions` 세션 로그를 **읽기 전용**으로 읽어 표시할 뿐, 외부로 전송하지 않고 엔진·세션 파일을 수정하지 않습니다.
 
-## 라이선스
+## License
 
 [MIT](LICENSE) © b0ho
