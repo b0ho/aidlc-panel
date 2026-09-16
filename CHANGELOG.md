@@ -1,5 +1,9 @@
 # Change Log
 
+## 1.0.4
+
+- 마켓 스크린샷 이미지 교체(진행 단계·질의응답, 단계 상세·토큰 사용량).
+
 ## 1.0.3
 
 - README 스크린샷을 GitHub 첨부 URL 대신 `media/screenshot-qa.png`, `media/screenshot-stage.png` 로컬 이미지로 변경.
