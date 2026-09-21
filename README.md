@@ -5,11 +5,11 @@
 No more digging through terminal logs or state files. One **AI-DLC** icon in the Activity Bar shows progress, artifacts, review status, and token usage, and lets you continue the workflow. The panel reads engine state **read-only** — it never touches or changes your workflow files.
 
 AI-DLC Panel — stages with per-stage credits, and inline Q&A
-<img width="1728" height="1082" alt="AI-DLC Panel Q&A screenshot" src="media/screenshot-qa.png" />
+<img src="media/screenshot-qa.png" alt="AI-DLC Panel Q&A screenshot" width="100%" />
 
 
 Stage detail — token usage, review status, assigned agents, and execution history
-<img width="1728" height="1084" alt="AI-DLC Panel stage detail screenshot" src="media/screenshot-stage.png" />
+<img src="media/screenshot-stage.png" alt="AI-DLC Panel stage detail screenshot" width="100%" />
 
 
 ## What you can do
